@@ -475,25 +475,54 @@ INDEX_HTML = r"""<!doctype html>
   <style>
     :root {
       color-scheme: light;
-      --bg: #f7f8f7;
-      --panel: #ffffff;
-      --panel-soft: #f1f4f2;
-      --line: #d8ded9;
+      --bg: #edf3f1;
+      --panel: rgba(255, 255, 255, .88);
+      --panel-soft: rgba(246, 249, 247, .82);
+      --line: rgba(82, 112, 95, .24);
       --text: #17201b;
-      --muted: #627067;
-      --accent: #256f53;
-      --accent-2: #345d86;
+      --muted: #5f6f66;
+      --accent: #1f7a61;
+      --accent-2: #405c88;
+      --copper: #a66f43;
       --danger: #b43c3c;
-      --shadow: 0 18px 44px rgba(29, 43, 34, .08);
+      --shadow: 0 24px 60px rgba(23, 32, 27, .10);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
-      background: var(--bg);
+      position: relative;
+      isolation: isolate;
+      overflow-x: hidden;
+      background:
+        linear-gradient(120deg, rgba(31, 122, 97, .10), transparent 34%),
+        linear-gradient(315deg, rgba(166, 111, 67, .08), transparent 30%),
+        var(--bg);
       color: var(--text);
       font: 14px/1.45 "Inter", "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
       letter-spacing: 0;
+    }
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: -1;
+    }
+    body::before {
+      background:
+        linear-gradient(90deg, rgba(31, 122, 97, .075) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(64, 92, 136, .055) 1px, transparent 1px),
+        linear-gradient(135deg, transparent 0 48%, rgba(166, 111, 67, .09) 48% 48.4%, transparent 48.4% 100%);
+      background-size: 52px 52px, 52px 52px, 220px 220px;
+      opacity: .78;
+    }
+    body::after {
+      background:
+        repeating-linear-gradient(115deg, transparent 0 84px, rgba(31, 122, 97, .09) 85px, transparent 88px),
+        linear-gradient(180deg, rgba(255, 255, 255, .64), transparent 36%);
+      opacity: .7;
     }
     button, input, textarea, select { font: inherit; letter-spacing: 0; }
     .app {
@@ -503,6 +532,8 @@ INDEX_HTML = r"""<!doctype html>
       width: min(1480px, calc(100vw - 32px));
       margin: 16px auto;
       min-height: calc(100vh - 32px);
+      position: relative;
+      z-index: 1;
     }
     .panel {
       background: var(--panel);
@@ -510,6 +541,8 @@ INDEX_HTML = r"""<!doctype html>
       border-radius: 8px;
       box-shadow: var(--shadow);
       min-width: 0;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
     }
     .sidebar, .result {
       padding: 16px;
@@ -549,7 +582,7 @@ INDEX_HTML = r"""<!doctype html>
       border: 1px solid var(--line);
       border-radius: 999px;
       color: var(--muted);
-      background: var(--panel-soft);
+      background: rgba(255, 255, 255, .74);
       white-space: nowrap;
     }
     .dot {
@@ -563,7 +596,8 @@ INDEX_HTML = r"""<!doctype html>
     .key-panel {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: var(--panel-soft);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .78), rgba(245, 249, 247, .68));
       overflow: hidden;
     }
     .key-panel summary {
@@ -613,7 +647,7 @@ INDEX_HTML = r"""<!doctype html>
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fff;
+      background: rgba(255, 255, 255, .86);
       color: var(--text);
       outline: none;
       padding: 10px 11px;
@@ -636,14 +670,14 @@ INDEX_HTML = r"""<!doctype html>
     .segmented button {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: var(--panel-soft);
+      background: rgba(255, 255, 255, .72);
       color: var(--muted);
       min-height: 40px;
       cursor: pointer;
     }
     .segmented button.active {
       border-color: var(--accent);
-      background: #e5f1eb;
+      background: linear-gradient(180deg, rgba(229, 241, 235, .96), rgba(215, 233, 224, .92));
       color: var(--accent);
       font-weight: 680;
     }
@@ -660,13 +694,13 @@ INDEX_HTML = r"""<!doctype html>
       border-radius: 8px;
       min-height: 40px;
       padding: 0 14px;
-      background: var(--panel-soft);
+      background: rgba(255, 255, 255, .72);
       color: var(--text);
       cursor: pointer;
     }
     .btn.primary {
       border-color: var(--accent);
-      background: var(--accent);
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
       color: #fff;
       min-width: 126px;
       font-weight: 680;
@@ -682,7 +716,7 @@ INDEX_HTML = r"""<!doctype html>
       padding: 12px;
       border: 1px dashed #b8c2ba;
       border-radius: 8px;
-      background: #fbfcfb;
+      background: rgba(251, 252, 251, .72);
     }
     .thumbs {
       display: grid;
@@ -696,7 +730,9 @@ INDEX_HTML = r"""<!doctype html>
       display: grid;
       place-items: center;
       overflow: hidden;
-      background: var(--panel-soft);
+      background:
+        linear-gradient(135deg, rgba(31, 122, 97, .08), transparent 44%),
+        rgba(246, 249, 247, .72);
       color: var(--muted);
       text-align: center;
       padding: 8px;
@@ -718,7 +754,9 @@ INDEX_HTML = r"""<!doctype html>
       padding: 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: var(--panel-soft);
+      background:
+        linear-gradient(135deg, rgba(64, 92, 136, .08), transparent 42%),
+        rgba(246, 249, 247, .76);
       min-height: 118px;
       display: grid;
       gap: 8px;
@@ -734,7 +772,7 @@ INDEX_HTML = r"""<!doctype html>
     .bar {
       height: 100%;
       width: 20%;
-      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      background: linear-gradient(90deg, var(--accent), var(--accent-2), var(--copper));
       transition: width .3s ease;
     }
     .history {
