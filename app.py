@@ -99,6 +99,8 @@ CAMERA_TEMPLATES = {
     "rapid_push_pull": "快速推拉",
 }
 
+MODEL_SOURCE = "模型列表根据火山引擎即梦视频生成接口文档整理为固定 req_key 清单，不是从实时模型列表接口获取。"
+
 
 @dataclass
 class Job:
@@ -364,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/config":
             self.send_json(credential_status())
         elif path == "/api/models":
-            self.send_json({"models": MODEL_CATALOG, "camera_templates": CAMERA_TEMPLATES})
+            self.send_json({"models": MODEL_CATALOG, "camera_templates": CAMERA_TEMPLATES, "source": MODEL_SOURCE})
         elif path == "/api/history":
             self.send_json({"items": history()})
         elif path.startswith("/api/jobs/"):
@@ -558,6 +560,49 @@ INDEX_HTML = r"""<!doctype html>
     }
     .dot.ok { background: var(--accent); }
     .stack { display: grid; gap: 12px; }
+    .key-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      overflow: hidden;
+    }
+    .key-panel summary {
+      min-height: 42px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      cursor: pointer;
+      color: var(--text);
+      font-weight: 680;
+      list-style: none;
+    }
+    .key-panel summary::-webkit-details-marker { display: none; }
+    .key-panel summary::after {
+      content: "+";
+      width: 22px;
+      height: 22px;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      background: #fff;
+      flex: 0 0 auto;
+    }
+    .key-panel[open] summary::after { content: "-"; }
+    .key-panel-body {
+      display: grid;
+      gap: 12px;
+      padding: 0 12px 12px;
+    }
+    .summary-copy {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 520;
+      margin-left: auto;
+    }
     .field { display: grid; gap: 6px; }
     label {
       color: var(--muted);
@@ -710,6 +755,14 @@ INDEX_HTML = r"""<!doctype html>
     }
     .muted { color: var(--muted); }
     .small { font-size: 12px; }
+    .note {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+    }
     .hidden { display: none !important; }
     @media (max-width: 1120px) {
       .app { grid-template-columns: 1fr; }
@@ -728,23 +781,28 @@ INDEX_HTML = r"""<!doctype html>
         <span class="status-pill"><span id="keyDot" class="dot"></span><span id="keyStatus">未配置</span></span>
       </div>
 
-      <div class="stack">
-        <h3>密钥</h3>
-        <div class="field">
-          <label for="accessKey">Access Key ID</label>
-          <input id="accessKey" autocomplete="off" spellcheck="false" />
+      <details class="key-panel" id="keyPanel">
+        <summary>
+          <span>密钥配置</span>
+          <span class="summary-copy">不常用，点击展开</span>
+        </summary>
+        <div class="key-panel-body">
+          <div class="field">
+            <label for="accessKey">Access Key ID</label>
+            <input id="accessKey" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="secretKey">Secret Access Key</label>
+            <input id="secretKey" type="password" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="keyFile">导入 Key 文件</label>
+            <input id="keyFile" type="file" accept=".txt,.env,.json,text/plain,application/json" />
+          </div>
+          <label><input id="saveKey" type="checkbox" style="width:auto;margin-right:6px" />保存到本机配置</label>
+          <button id="saveConfig" class="btn">保存配置</button>
         </div>
-        <div class="field">
-          <label for="secretKey">Secret Access Key</label>
-          <input id="secretKey" type="password" autocomplete="off" spellcheck="false" />
-        </div>
-        <div class="field">
-          <label for="keyFile">导入 Key 文件</label>
-          <input id="keyFile" type="file" accept=".txt,.env,.json,text/plain,application/json" />
-        </div>
-        <label><input id="saveKey" type="checkbox" style="width:auto;margin-right:6px" />保存到本机配置</label>
-        <button id="saveConfig" class="btn">保存配置</button>
-      </div>
+      </details>
 
       <div class="stack">
         <h3>模型</h3>
@@ -752,6 +810,7 @@ INDEX_HTML = r"""<!doctype html>
           <label for="model">生成模型</label>
           <select id="model"></select>
         </div>
+        <div class="note" id="modelSource">模型列表来自官方文档整理，不是实时接口拉取。</div>
         <div class="grid-2">
           <div class="field">
             <label for="frames">时长</label>
@@ -922,6 +981,7 @@ INDEX_HTML = r"""<!doctype html>
       $("model").innerHTML = Object.entries(models).map(([key, model]) =>
         `<option value="${key}">${model.label}</option>`
       ).join("");
+      $("modelSource").textContent = data.source || "模型列表来自官方文档整理，不是实时接口拉取。";
       $("template").innerHTML = Object.entries(data.camera_templates).map(([key, label]) =>
         `<option value="${key}">${label}</option>`
       ).join("");
