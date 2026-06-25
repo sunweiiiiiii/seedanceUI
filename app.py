@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from ark_seedance import create_generation_task, download_file, get_generation_task
+from tos_uploader import TOSConfig, TOSUploadError, parse_image_data, upload_image
 
 
 ROOT = Path(__file__).resolve().parent
@@ -81,6 +82,7 @@ class Job:
 jobs: dict[str, Job] = {}
 jobs_lock = threading.Lock()
 memory_credentials: dict[str, str] = {}
+memory_storage: dict[str, str] = {}
 
 
 def read_config() -> dict[str, str]:
@@ -90,11 +92,34 @@ def read_config() -> dict[str, str]:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
-    return {"api_key": str(data.get("api_key") or data.get("ark_api_key") or "").strip()}
+    return {
+        "api_key": str(data.get("api_key") or data.get("ark_api_key") or "").strip(),
+        "tos_access_key": str(data.get("tos_access_key") or data.get("tos_ak") or "").strip(),
+        "tos_secret_key": str(data.get("tos_secret_key") or data.get("tos_sk") or "").strip(),
+        "tos_bucket": str(data.get("tos_bucket") or "").strip(),
+        "tos_region": str(data.get("tos_region") or "cn-beijing").strip(),
+        "tos_endpoint": str(data.get("tos_endpoint") or "tos-cn-beijing.volces.com").strip(),
+        "tos_prefix": str(data.get("tos_prefix") or "seedance-references").strip(),
+        "tos_url_mode": str(data.get("tos_url_mode") or "signed").strip(),
+        "tos_signed_expires": str(data.get("tos_signed_expires") or "86400").strip(),
+        "tos_public_base_url": str(data.get("tos_public_base_url") or "").strip(),
+    }
 
 
-def write_config(api_key: str) -> None:
-    CONFIG_PATH.write_text(json.dumps({"api_key": api_key}, ensure_ascii=False, indent=2), encoding="utf-8")
+def write_config(data: dict[str, str]) -> None:
+    CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_api_config(api_key: str) -> None:
+    cfg = read_config()
+    cfg["api_key"] = api_key
+    write_config(cfg)
+
+
+def write_storage_config(storage: dict[str, str]) -> None:
+    cfg = read_config()
+    cfg.update(storage)
+    write_config(cfg)
 
 
 def mask_key(value: str) -> str:
@@ -117,6 +142,78 @@ def credential_status() -> dict[str, Any]:
     elif cfg.get("api_key"):
         source = "local"
     return {"configured": bool(api_key), "api_key": mask_key(api_key), "source": source}
+
+
+def storage_status() -> dict[str, Any]:
+    cfg = read_config()
+    env_ak = os.environ.get("TOS_ACCESSKEY") or os.environ.get("VOLC_ACCESSKEY")
+    env_sk = os.environ.get("TOS_SECRETKEY") or os.environ.get("VOLC_SECRETKEY")
+    access_key = env_ak or memory_storage.get("tos_access_key") or cfg.get("tos_access_key", "")
+    secret_key = env_sk or memory_storage.get("tos_secret_key") or cfg.get("tos_secret_key", "")
+    bucket = os.environ.get("TOS_BUCKET") or memory_storage.get("tos_bucket") or cfg.get("tos_bucket", "")
+    source = "none"
+    if env_ak and env_sk and bucket:
+        source = "env"
+    elif memory_storage:
+        source = "session"
+    elif cfg.get("tos_access_key") and cfg.get("tos_secret_key") and cfg.get("tos_bucket"):
+        source = "local"
+    return {
+        "configured": bool(access_key and secret_key and bucket),
+        "source": source,
+        "access_key": mask_key(access_key),
+        "secret_key": mask_key(secret_key),
+        "bucket": bucket,
+        "region": os.environ.get("TOS_REGION") or memory_storage.get("tos_region") or cfg.get("tos_region", "cn-beijing"),
+        "endpoint": os.environ.get("TOS_ENDPOINT") or memory_storage.get("tos_endpoint") or cfg.get("tos_endpoint", "tos-cn-beijing.volces.com"),
+        "prefix": os.environ.get("TOS_PREFIX") or memory_storage.get("tos_prefix") or cfg.get("tos_prefix", "seedance-references"),
+        "url_mode": os.environ.get("TOS_URL_MODE") or memory_storage.get("tos_url_mode") or cfg.get("tos_url_mode", "signed"),
+        "signed_expires": os.environ.get("TOS_SIGNED_EXPIRES")
+        or memory_storage.get("tos_signed_expires")
+        or cfg.get("tos_signed_expires", "86400"),
+        "public_base_url": os.environ.get("TOS_PUBLIC_BASE_URL")
+        or memory_storage.get("tos_public_base_url")
+        or cfg.get("tos_public_base_url", ""),
+    }
+
+
+def resolve_storage_config(payload: dict[str, Any] | None = None) -> TOSConfig:
+    payload = payload or {}
+    cfg = read_config()
+
+    def value(name: str, env_name: str = "") -> str:
+        return (
+            str(payload.get(name) or "").strip()
+            or (os.environ.get(env_name) if env_name else "")
+            or memory_storage.get(name)
+            or cfg.get(name, "")
+        )
+
+    access_key = value("tos_access_key", "TOS_ACCESSKEY") or os.environ.get("VOLC_ACCESSKEY", "")
+    secret_key = value("tos_secret_key", "TOS_SECRETKEY") or os.environ.get("VOLC_SECRETKEY", "")
+    bucket = value("tos_bucket", "TOS_BUCKET")
+    region = value("tos_region", "TOS_REGION") or "cn-beijing"
+    endpoint = value("tos_endpoint", "TOS_ENDPOINT") or "tos-cn-beijing.volces.com"
+    prefix = value("tos_prefix", "TOS_PREFIX") or "seedance-references"
+    url_mode = value("tos_url_mode", "TOS_URL_MODE") or "signed"
+    public_base_url = value("tos_public_base_url", "TOS_PUBLIC_BASE_URL")
+    try:
+        signed_expires = int(value("tos_signed_expires", "TOS_SIGNED_EXPIRES") or 86400)
+    except ValueError as exc:
+        raise ValueError("TOS 预签名有效期必须是数字。") from exc
+    if signed_expires < 60 or signed_expires > 604800:
+        raise ValueError("TOS 预签名有效期建议设置在 60-604800 秒之间。")
+    return TOSConfig(
+        access_key=access_key,
+        secret_key=secret_key,
+        bucket=bucket,
+        region=region,
+        endpoint=endpoint,
+        prefix=prefix,
+        url_mode=url_mode,
+        signed_expires=signed_expires,
+        public_base_url=public_base_url,
+    )
 
 
 def resolve_api_key(payload: dict[str, Any] | None = None) -> str:
@@ -336,6 +433,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(INDEX_HTML)
         elif path == "/api/config":
             self.send_json(credential_status())
+        elif path == "/api/storage/config":
+            self.send_json(storage_status())
         elif path == "/api/models":
             self.send_json({"models": MODEL_CATALOG, "source": MODEL_SOURCE, "ratios": sorted(RATIOS)})
         elif path == "/api/history":
@@ -357,9 +456,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
-            payload = self.read_json()
+            payload = self.read_json(max_bytes=18 * 1024 * 1024 if parsed.path == "/api/upload-reference" else 256 * 1024)
             if parsed.path == "/api/config":
                 self.save_config(payload)
+            elif parsed.path == "/api/storage/config":
+                self.save_storage_config(payload)
+            elif parsed.path == "/api/upload-reference":
+                self.upload_reference(payload)
             elif parsed.path == "/api/generate":
                 self.generate(payload)
             else:
@@ -373,8 +476,39 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("请填写 Ark API Key。")
         memory_credentials["api_key"] = api_key
         if bool(payload.get("save")):
-            write_config(api_key)
+            write_api_config(api_key)
         self.send_json(credential_status())
+
+    def save_storage_config(self, payload: dict[str, Any]) -> None:
+        storage = resolve_storage_config(payload)
+        memory_storage.update(
+            {
+                "tos_access_key": storage.access_key,
+                "tos_secret_key": storage.secret_key,
+                "tos_bucket": storage.bucket,
+                "tos_region": storage.region,
+                "tos_endpoint": storage.endpoint,
+                "tos_prefix": storage.prefix,
+                "tos_url_mode": storage.url_mode,
+                "tos_signed_expires": str(storage.signed_expires),
+                "tos_public_base_url": storage.public_base_url,
+            }
+        )
+        if bool(payload.get("save")):
+            write_storage_config(memory_storage)
+        self.send_json(storage_status())
+
+    def upload_reference(self, payload: dict[str, Any]) -> None:
+        filename = str(payload.get("file_name") or "reference.png").strip()
+        content_type = str(payload.get("content_type") or "").strip()
+        data_url = str(payload.get("data_url") or payload.get("base64") or "").strip()
+        if not data_url:
+            raise ValueError("请选择要上传的图片。")
+        mime, data = parse_image_data(data_url, content_type)
+        storage_payload = payload.get("storage") if isinstance(payload.get("storage"), dict) else payload
+        storage = resolve_storage_config(storage_payload)
+        result = upload_image(storage, filename, mime, data)
+        self.send_json(result)
 
     def generate(self, payload: dict[str, Any]) -> None:
         api_key = resolve_api_key(payload)
@@ -387,10 +521,10 @@ class Handler(BaseHTTPRequestHandler):
         thread.start()
         self.send_json(job.as_dict())
 
-    def read_json(self) -> dict[str, Any]:
+    def read_json(self, max_bytes: int = 256 * 1024) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 256 * 1024:
-            raise ValueError("请求过大。参考素材请使用公网 URL。")
+        if length > max_bytes:
+            raise ValueError("请求过大。图片不能超过 12 MB。")
         raw = self.rfile.read(length)
         if not raw:
             return {}
@@ -617,6 +751,22 @@ INDEX_HTML = r"""<!doctype html>
       border-radius: 8px;
       background: rgba(255,255,255,.58);
     }
+    .upload-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .upload-row input[type="file"] {
+      padding: 8px;
+      min-width: 0;
+    }
+    .upload-status {
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 18px;
+      overflow-wrap: anywhere;
+    }
     .toolbar {
       display: flex;
       align-items: center;
@@ -745,6 +895,66 @@ INDEX_HTML = r"""<!doctype html>
         </div>
       </details>
 
+      <details class="key-panel" id="storagePanel">
+        <summary>
+          <span>TOS 图片上传</span>
+          <span class="summary-copy" id="storageStatus">未配置</span>
+        </summary>
+        <div class="key-panel-body">
+          <div class="field">
+            <label for="tosAccessKey">TOS Access Key ID</label>
+            <input id="tosAccessKey" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="tosSecretKey">TOS Secret Access Key</label>
+            <input id="tosSecretKey" type="password" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="tosBucket">Bucket</label>
+            <input id="tosBucket" placeholder="your-bucket" />
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="tosRegion">Region</label>
+              <input id="tosRegion" value="cn-beijing" />
+            </div>
+            <div class="field">
+              <label for="tosEndpoint">Endpoint</label>
+              <input id="tosEndpoint" value="tos-cn-beijing.volces.com" />
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="tosPrefix">对象前缀</label>
+              <input id="tosPrefix" value="seedance-references" />
+            </div>
+            <div class="field">
+              <label for="tosUrlMode">URL 模式</label>
+              <select id="tosUrlMode">
+                <option value="signed">预签名 URL</option>
+                <option value="public">公开 URL</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="tosSignedExpires">预签名有效期</label>
+              <input id="tosSignedExpires" type="number" value="86400" />
+            </div>
+            <div class="field">
+              <label for="tosPublicBase">公开 Base URL</label>
+              <input id="tosPublicBase" placeholder="可选 CDN/自定义域名" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="tosFile">导入 TOS 配置文件</label>
+            <input id="tosFile" type="file" accept=".txt,.env,.json,text/plain,application/json" />
+          </div>
+          <label><input id="saveStorage" type="checkbox" style="width:auto;margin-right:6px" />保存到本机配置</label>
+          <button id="saveStorageConfig" class="btn">保存 TOS 配置</button>
+        </div>
+      </details>
+
       <div class="stack">
         <h3>模型</h3>
         <div class="field">
@@ -831,20 +1041,44 @@ INDEX_HTML = r"""<!doctype html>
           <div class="field">
             <label id="imageLabel1" for="imageUrl1">参考图 1 URL</label>
             <input id="imageUrl1" placeholder="https://..." />
+            <div class="upload-row">
+              <input id="imageFile1" type="file" accept="image/png,image/jpeg,image/webp" />
+              <button type="button" class="btn" data-upload-slot="1">上传</button>
+              <button type="button" class="btn" data-ref-slot="1">引用</button>
+            </div>
+            <div id="imageUpload1" class="upload-status"></div>
           </div>
           <div class="field">
             <label id="imageLabel2" for="imageUrl2">参考图 2 URL</label>
             <input id="imageUrl2" placeholder="https://..." />
+            <div class="upload-row">
+              <input id="imageFile2" type="file" accept="image/png,image/jpeg,image/webp" />
+              <button type="button" class="btn" data-upload-slot="2">上传</button>
+              <button type="button" class="btn" data-ref-slot="2">引用</button>
+            </div>
+            <div id="imageUpload2" class="upload-status"></div>
           </div>
         </div>
         <div class="grid-2" id="extraImageUrls">
           <div class="field">
             <label for="imageUrl3">参考图 3 URL</label>
             <input id="imageUrl3" placeholder="https://..." />
+            <div class="upload-row">
+              <input id="imageFile3" type="file" accept="image/png,image/jpeg,image/webp" />
+              <button type="button" class="btn" data-upload-slot="3">上传</button>
+              <button type="button" class="btn" data-ref-slot="3">引用</button>
+            </div>
+            <div id="imageUpload3" class="upload-status"></div>
           </div>
           <div class="field">
             <label for="imageUrl4">参考图 4 URL</label>
             <input id="imageUrl4" placeholder="https://..." />
+            <div class="upload-row">
+              <input id="imageFile4" type="file" accept="image/png,image/jpeg,image/webp" />
+              <button type="button" class="btn" data-upload-slot="4">上传</button>
+              <button type="button" class="btn" data-ref-slot="4">引用</button>
+            </div>
+            <div id="imageUpload4" class="upload-status"></div>
           </div>
         </div>
         <div class="grid-2" id="mediaUrls">
@@ -857,7 +1091,7 @@ INDEX_HTML = r"""<!doctype html>
             <input id="audioUrl" placeholder="https://...mp3" />
           </div>
         </div>
-        <div class="note">参考素材需要公网可访问 URL；本机文件请先上传到 TOS、OSS 或其他可访问地址。</div>
+        <div class="note">可直接选择本地图片上传到 TOS，成功后会自动填入 URL；Prompt 中可写“图片1”“图片2”引用对应槽位。</div>
       </div>
 
       <div class="field">
@@ -917,6 +1151,38 @@ INDEX_HTML = r"""<!doctype html>
       if (data.api_key) $("apiKey").placeholder = data.api_key;
     }
 
+    function storagePayload() {
+      return {
+        tos_access_key: $("tosAccessKey").value.trim(),
+        tos_secret_key: $("tosSecretKey").value.trim(),
+        tos_bucket: $("tosBucket").value.trim(),
+        tos_region: $("tosRegion").value.trim(),
+        tos_endpoint: $("tosEndpoint").value.trim(),
+        tos_prefix: $("tosPrefix").value.trim(),
+        tos_url_mode: $("tosUrlMode").value,
+        tos_signed_expires: $("tosSignedExpires").value.trim(),
+        tos_public_base_url: $("tosPublicBase").value.trim()
+      };
+    }
+
+    function renderStorageConfig(data) {
+      $("storageStatus").textContent = data.configured ? (data.source === "env" ? "环境变量" : "已配置") : "未配置";
+      if (data.access_key) $("tosAccessKey").placeholder = data.access_key;
+      if (data.secret_key) $("tosSecretKey").placeholder = data.secret_key;
+      ["bucket", "region", "endpoint", "prefix", "signed_expires", "public_base_url"].forEach(key => {
+        const ids = {
+          bucket: "tosBucket",
+          region: "tosRegion",
+          endpoint: "tosEndpoint",
+          prefix: "tosPrefix",
+          signed_expires: "tosSignedExpires",
+          public_base_url: "tosPublicBase"
+        };
+        if (data[key] && !$(ids[key]).value) $(ids[key]).value = data[key];
+      });
+      if (data.url_mode) $("tosUrlMode").value = data.url_mode;
+    }
+
     function parseKeyFile(text) {
       const trimmed = text.trim();
       if (!trimmed) throw new Error("Key 文件为空");
@@ -938,6 +1204,44 @@ INDEX_HTML = r"""<!doctype html>
         if (["apikey", "arkapikey", "arkkey", "volcarkapikey"].includes(key)) return value;
       }
       throw new Error("没有解析到 Ark API Key");
+    }
+
+    function parseStorageFile(text) {
+      const trimmed = text.trim();
+      if (!trimmed) throw new Error("TOS 配置文件为空");
+      const result = {};
+      try {
+        const data = JSON.parse(trimmed);
+        result.tos_access_key = data.tos_access_key || data.access_key || data.AccessKeyID || data.AccessKeyId || data.TOS_ACCESSKEY || data.VOLC_ACCESSKEY || "";
+        result.tos_secret_key = data.tos_secret_key || data.secret_key || data.SecretAccessKey || data.TOS_SECRETKEY || data.VOLC_SECRETKEY || "";
+        result.tos_bucket = data.tos_bucket || data.bucket || data.TOS_BUCKET || "";
+        result.tos_region = data.tos_region || data.region || data.TOS_REGION || "";
+        result.tos_endpoint = data.tos_endpoint || data.endpoint || data.TOS_ENDPOINT || "";
+        result.tos_prefix = data.tos_prefix || data.prefix || data.TOS_PREFIX || "";
+        result.tos_url_mode = data.tos_url_mode || data.url_mode || data.TOS_URL_MODE || "";
+        result.tos_signed_expires = data.tos_signed_expires || data.signed_expires || data.TOS_SIGNED_EXPIRES || "";
+        result.tos_public_base_url = data.tos_public_base_url || data.public_base_url || data.TOS_PUBLIC_BASE_URL || "";
+      } catch (_) {}
+      const lines = trimmed.split(/\r?\n/);
+      for (const line of lines) {
+        const clean = line.trim();
+        if (!clean || clean.startsWith("#")) continue;
+        const match = clean.match(/^([^:=\s][^:=]*?)\s*[:=]\s*(.+)$/);
+        if (!match) continue;
+        const key = match[1].trim().toLowerCase().replace(/[\s_\-]/g, "");
+        const value = match[2].trim().replace(/^["']|["']$/g, "");
+        if (["accesskeyid", "accesskey", "ak", "tosaccesskey", "tosaccesskeyid", "volcaccesskey"].includes(key)) result.tos_access_key = value;
+        if (["secretaccesskey", "secretkey", "sk", "tossecretkey", "volcsecretkey"].includes(key)) result.tos_secret_key = value;
+        if (["bucket", "tosbucket"].includes(key)) result.tos_bucket = value;
+        if (["region", "tosregion"].includes(key)) result.tos_region = value;
+        if (["endpoint", "tosendpoint"].includes(key)) result.tos_endpoint = value;
+        if (["prefix", "tosprefix"].includes(key)) result.tos_prefix = value;
+        if (["urlmode", "tosurlmode"].includes(key)) result.tos_url_mode = value;
+        if (["signedexpires", "tossignedexpires"].includes(key)) result.tos_signed_expires = value;
+        if (["publicbaseurl", "tospublicbaseurl"].includes(key)) result.tos_public_base_url = value;
+      }
+      if (!result.tos_access_key && !result.tos_secret_key && !result.tos_bucket) throw new Error("没有解析到 TOS 配置");
+      return result;
     }
 
     function renderModels(data) {
@@ -1052,6 +1356,61 @@ INDEX_HTML = r"""<!doctype html>
       return ids.map(id => $(id).value.trim()).filter(Boolean);
     }
 
+    async function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function insertPromptRef(slot) {
+      const prompt = $("prompt");
+      const text = `图片${slot}`;
+      const start = prompt.selectionStart || prompt.value.length;
+      const end = prompt.selectionEnd || prompt.value.length;
+      const before = prompt.value.slice(0, start);
+      const after = prompt.value.slice(end);
+      const spacerBefore = before && !/\s$/.test(before) ? " " : "";
+      const spacerAfter = after && !/^\s/.test(after) ? " " : "";
+      prompt.value = `${before}${spacerBefore}${text}${spacerAfter}${after}`;
+      const pos = before.length + spacerBefore.length + text.length;
+      prompt.focus();
+      prompt.setSelectionRange(pos, pos);
+      $("charCount").textContent = `${prompt.value.length} 字`;
+    }
+
+    async function uploadReference(slot) {
+      const fileInput = $(`imageFile${slot}`);
+      const status = $(`imageUpload${slot}`);
+      const file = fileInput.files[0];
+      if (!file) {
+        status.textContent = "请选择本地图片";
+        return;
+      }
+      const button = document.querySelector(`[data-upload-slot="${slot}"]`);
+      button.disabled = true;
+      status.textContent = "上传中...";
+      try {
+        const data = await api("/api/upload-reference", {
+          method: "POST",
+          body: JSON.stringify({
+            file_name: file.name,
+            content_type: file.type,
+            data_url: await fileToDataUrl(file),
+            storage: storagePayload()
+          })
+        });
+        $(`imageUrl${slot}`).value = data.url;
+        status.textContent = `已上传：图片${slot} · ${(data.size / 1024 / 1024).toFixed(2)} MB`;
+      } catch (err) {
+        status.textContent = err.message;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     async function generate() {
       $("generate").disabled = true;
       resetJobView();
@@ -1109,6 +1468,40 @@ INDEX_HTML = r"""<!doctype html>
         event.target.value = "";
       }
     });
+    $("saveStorageConfig").addEventListener("click", async () => {
+      try {
+        const data = await api("/api/storage/config", {
+          method: "POST",
+          body: JSON.stringify({...storagePayload(), save: $("saveStorage").checked})
+        });
+        $("tosAccessKey").value = "";
+        $("tosSecretKey").value = "";
+        renderStorageConfig(data);
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+    $("tosFile").addEventListener("change", async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      try {
+        const data = parseStorageFile(await file.text());
+        if (data.tos_access_key) $("tosAccessKey").value = data.tos_access_key;
+        if (data.tos_secret_key) $("tosSecretKey").value = data.tos_secret_key;
+        if (data.tos_bucket) $("tosBucket").value = data.tos_bucket;
+        if (data.tos_region) $("tosRegion").value = data.tos_region;
+        if (data.tos_endpoint) $("tosEndpoint").value = data.tos_endpoint;
+        if (data.tos_prefix) $("tosPrefix").value = data.tos_prefix;
+        if (data.tos_url_mode) $("tosUrlMode").value = data.tos_url_mode;
+        if (data.tos_signed_expires) $("tosSignedExpires").value = data.tos_signed_expires;
+        if (data.tos_public_base_url) $("tosPublicBase").value = data.tos_public_base_url;
+        $("storageStatus").textContent = "已导入";
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        event.target.value = "";
+      }
+    });
     $("model").addEventListener("change", updateModelFields);
     $("modeTabs").addEventListener("click", (event) => {
       const btn = event.target.closest("button");
@@ -1121,16 +1514,25 @@ INDEX_HTML = r"""<!doctype html>
       updateImageIntent();
     });
     $("generate").addEventListener("click", generate);
+    document.querySelectorAll("[data-upload-slot]").forEach(button => {
+      button.addEventListener("click", () => uploadReference(button.dataset.uploadSlot));
+    });
+    document.querySelectorAll("[data-ref-slot]").forEach(button => {
+      button.addEventListener("click", () => insertPromptRef(button.dataset.refSlot));
+    });
     $("refreshHistory").addEventListener("click", loadHistory);
     $("prompt").addEventListener("input", () => $("charCount").textContent = `${$("prompt").value.length} 字`);
     $("clearForm").addEventListener("click", () => {
       $("prompt").value = "";
       ["imageUrl1", "imageUrl2", "imageUrl3", "imageUrl4", "videoUrl", "audioUrl"].forEach(id => $(id).value = "");
+      ["imageFile1", "imageFile2", "imageFile3", "imageFile4"].forEach(id => $(id).value = "");
+      ["imageUpload1", "imageUpload2", "imageUpload3", "imageUpload4"].forEach(id => $(id).textContent = "");
       $("charCount").textContent = "0 字";
     });
 
     Promise.all([
       api("/api/config").then(renderConfig),
+      api("/api/storage/config").then(renderStorageConfig),
       api("/api/models").then(renderModels),
       loadHistory()
     ]);
