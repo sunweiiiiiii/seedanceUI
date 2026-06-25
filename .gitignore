@@ -1,0 +1,4 @@
+__pycache__/
+.jimeng_config.json
+outputs/
+prompt_*.txt
