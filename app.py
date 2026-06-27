@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from ark_seedance import create_generation_task, download_file, get_generation_task
-from tos_uploader import TOSConfig, TOSUploadError, parse_image_data, upload_image
+from tos_uploader import TOSConfig, TOSUploadError, upload_media
 
 
 ROOT = Path(__file__).resolve().parent
@@ -30,8 +30,8 @@ MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "seedance_2": {
         "label": "Doubao Seedance 2.0",
         "model_id": "doubao-seedance-2-0-260128",
-        "description": "标准质量，支持 480p / 720p / 1080p",
-        "resolutions": ["480p", "720p", "1080p"],
+        "description": "标准质量，支持 480p / 720p / 1080p / 4k",
+        "resolutions": ["480p", "720p", "1080p", "4k"],
     },
     "seedance_2_fast": {
         "label": "Doubao Seedance 2.0 Fast",
@@ -46,7 +46,7 @@ MODEL_SOURCE = (
     "当前界面使用固定白名单，不是通过实时模型列表接口拉取。"
 )
 RATIOS = {"adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"}
-RESOLUTIONS = {"480p", "720p", "1080p"}
+RESOLUTIONS = {"480p", "720p", "1080p", "4k"}
 
 
 @dataclass
@@ -250,6 +250,8 @@ def build_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
     audio_url = str(payload.get("audio_url") or "").strip()
     if not prompt and not (image_urls or video_url or audio_url):
         raise ValueError("请填写提示词或至少提供一个参考素材 URL。")
+    if len(image_urls) > 9:
+        raise ValueError("参考图片最多 9 张。")
 
     content: list[dict[str, Any]] = []
     if prompt:
@@ -260,8 +262,6 @@ def build_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
         content.append({"type": "video_url", "video_url": {"url": video_url}, "role": "reference_video"})
     if audio_url:
         content.append({"type": "audio_url", "audio_url": {"url": audio_url}, "role": "reference_audio"})
-    if len(content) > 5:
-        raise ValueError("Ark content 最多 5 项；包含提示词时最多再放 4 个参考素材。")
     return content
 
 
@@ -423,6 +423,57 @@ def history() -> list[dict[str, Any]]:
     return items[:30]
 
 
+def _parse_header_params(value: str) -> dict[str, str]:
+    parts = [part.strip() for part in value.split(";")]
+    params: dict[str, str] = {"": parts[0].lower() if parts else ""}
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        key, raw = part.split("=", 1)
+        params[key.strip().lower()] = raw.strip().strip('"')
+    return params
+
+
+def parse_multipart(content_type: str, body: bytes) -> dict[str, Any]:
+    params = _parse_header_params(content_type)
+    boundary = params.get("boundary", "")
+    if not boundary:
+        raise ValueError("multipart 请求缺少 boundary。")
+    marker = b"--" + boundary.encode("utf-8")
+    payload: dict[str, Any] = {}
+    for part in body.split(marker):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        if part.endswith(b"--"):
+            part = part[:-2].rstrip(b"\r\n")
+        header_blob, sep, data = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        headers: dict[str, str] = {}
+        for line in header_blob.decode("utf-8", errors="replace").split("\r\n"):
+            if ":" not in line:
+                continue
+            key, raw = line.split(":", 1)
+            headers[key.strip().lower()] = raw.strip()
+        disposition = _parse_header_params(headers.get("content-disposition", ""))
+        name = disposition.get("name", "")
+        if not name:
+            continue
+        if data.endswith(b"\r\n"):
+            data = data[:-2]
+        filename = disposition.get("filename")
+        if filename:
+            payload[name] = {
+                "file_name": Path(filename).name,
+                "content_type": headers.get("content-type", ""),
+                "data": data,
+            }
+        else:
+            payload[name] = data.decode("utf-8", errors="replace")
+    return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -456,7 +507,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
-            payload = self.read_json(max_bytes=18 * 1024 * 1024 if parsed.path == "/api/upload-reference" else 256 * 1024)
+            payload = self.read_payload(max_bytes=360 * 1024 * 1024 if parsed.path == "/api/upload-reference" else 256 * 1024)
             if parsed.path == "/api/config":
                 self.save_config(payload)
             elif parsed.path == "/api/storage/config":
@@ -499,15 +550,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(storage_status())
 
     def upload_reference(self, payload: dict[str, Any]) -> None:
-        filename = str(payload.get("file_name") or "reference.png").strip()
-        content_type = str(payload.get("content_type") or "").strip()
-        data_url = str(payload.get("data_url") or payload.get("base64") or "").strip()
-        if not data_url:
-            raise ValueError("请选择要上传的图片。")
-        mime, data = parse_image_data(data_url, content_type)
+        file_payload = payload.get("file")
+        if not isinstance(file_payload, dict) or not file_payload.get("data"):
+            raise ValueError("请选择要上传的图片、视频或音频。")
+        filename = str(file_payload.get("file_name") or payload.get("file_name") or "reference.bin").strip()
+        content_type = str(file_payload.get("content_type") or payload.get("content_type") or "").strip()
         storage_payload = payload.get("storage") if isinstance(payload.get("storage"), dict) else payload
         storage = resolve_storage_config(storage_payload)
-        result = upload_image(storage, filename, mime, data)
+        result = upload_media(storage, filename, content_type, file_payload["data"])
         self.send_json(result)
 
     def generate(self, payload: dict[str, Any]) -> None:
@@ -521,13 +571,16 @@ class Handler(BaseHTTPRequestHandler):
         thread.start()
         self.send_json(job.as_dict())
 
-    def read_json(self, max_bytes: int = 256 * 1024) -> dict[str, Any]:
+    def read_payload(self, max_bytes: int = 256 * 1024) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length > max_bytes:
-            raise ValueError("请求过大。图片不能超过 12 MB。")
+            raise ValueError("请求过大。图片不超过 12 MB，视频不超过 300 MB，音频不超过 80 MB。")
         raw = self.rfile.read(length)
         if not raw:
             return {}
+        content_type = self.headers.get("Content-Type", "")
+        if content_type.lower().startswith("multipart/form-data"):
+            return parse_multipart(content_type, raw)
         return json.loads(raw.decode("utf-8"))
 
     def send_output(self, path: str) -> None:
@@ -574,34 +627,34 @@ INDEX_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Seedance 2.0 控制台</title>
+  <title>Seedance Studio</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #eef4f2;
-      --panel: rgba(255,255,255,.86);
-      --panel-strong: rgba(255,255,255,.94);
-      --soft: rgba(244,248,247,.78);
-      --line: rgba(42,76,86,.22);
-      --text: #14201f;
-      --muted: #60716e;
-      --accent: #147d73;
-      --accent-2: #315b95;
-      --amber: #a86f35;
-      --danger: #b43c3c;
-      --shadow: 0 24px 70px rgba(19,39,43,.13);
+      color-scheme: dark;
+      --bg: #101115;
+      --panel: rgba(20, 22, 29, .76);
+      --panel-strong: rgba(24, 27, 36, .92);
+      --line: rgba(198, 232, 255, .18);
+      --text: #f6f7fb;
+      --muted: #a8b0be;
+      --cyan: #34d6ff;
+      --lime: #b7ff5a;
+      --pink: #ff4fb8;
+      --amber: #ffc44d;
+      --danger: #ff6b6b;
+      --shadow: 0 24px 80px rgba(0, 0, 0, .38);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
       color: var(--text);
-      background:
-        linear-gradient(120deg, rgba(20,125,115,.13), transparent 34%),
-        linear-gradient(300deg, rgba(49,91,149,.11), transparent 32%),
-        var(--bg);
       font: 14px/1.45 "Inter", "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
       letter-spacing: 0;
+      background:
+        linear-gradient(135deg, rgba(52, 214, 255, .12), transparent 32%),
+        linear-gradient(315deg, rgba(255, 79, 184, .11), transparent 34%),
+        linear-gradient(180deg, #101115 0%, #17151d 48%, #11151a 100%);
       overflow-x: hidden;
       isolation: isolate;
     }
@@ -609,546 +662,548 @@ INDEX_HTML = r"""<!doctype html>
       content: "";
       position: fixed;
       inset: 0;
-      z-index: -1;
       pointer-events: none;
+      z-index: -1;
     }
     body::before {
       background:
-        linear-gradient(90deg, rgba(20,125,115,.08) 1px, transparent 1px),
-        linear-gradient(0deg, rgba(49,91,149,.06) 1px, transparent 1px),
-        repeating-linear-gradient(115deg, transparent 0 86px, rgba(168,111,53,.10) 87px, transparent 90px);
-      background-size: 52px 52px, 52px 52px, 260px 260px;
-      opacity: .76;
+        linear-gradient(90deg, rgba(52, 214, 255, .08) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(183, 255, 90, .055) 1px, transparent 1px),
+        repeating-linear-gradient(118deg, transparent 0 88px, rgba(255, 196, 77, .13) 89px, transparent 92px);
+      background-size: 52px 52px, 52px 52px, 280px 280px;
+      mask-image: linear-gradient(180deg, #000, transparent 86%);
     }
     body::after {
-      background: linear-gradient(180deg, rgba(255,255,255,.62), transparent 42%);
+      background: linear-gradient(180deg, rgba(255,255,255,.07), transparent 26%);
     }
     button, input, textarea, select { font: inherit; letter-spacing: 0; }
-    .app {
-      width: min(1480px, calc(100vw - 32px));
-      min-height: calc(100vh - 32px);
-      margin: 16px auto;
+    .shell {
+      width: min(1160px, calc(100vw - 28px));
+      margin: 0 auto;
+      min-height: 100vh;
       display: grid;
-      grid-template-columns: 320px minmax(520px, 1fr) 360px;
-      gap: 16px;
+      grid-template-rows: auto 1fr auto;
+      gap: 18px;
+      padding: 18px 0 22px;
     }
-    .panel {
-      min-width: 0;
-      background: var(--panel);
-      border: 1px solid var(--line);
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 44px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 760;
+      font-size: 16px;
+    }
+    .mark {
+      width: 28px;
+      height: 28px;
+      border: 1px solid rgba(255,255,255,.32);
       border-radius: 8px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
+      background: linear-gradient(135deg, var(--cyan), var(--pink));
+      box-shadow: 0 0 28px rgba(52, 214, 255, .28);
     }
-    .sidebar, .result {
-      align-self: start;
-      position: sticky;
-      top: 16px;
-      max-height: calc(100vh - 32px);
-      overflow: auto;
-      padding: 16px;
-    }
-    .main {
-      padding: 16px;
-      display: grid;
-      gap: 14px;
-      grid-template-rows: auto auto auto 1fr auto;
-    }
-    h1, h2, h3 { margin: 0; font-weight: 680; }
-    h1 { font-size: 20px; }
-    h2 { margin-top: 3px; color: var(--muted); font-size: 12px; font-weight: 560; }
-    h3 { font-size: 13px; }
-    .stack { display: grid; gap: 12px; }
-    .topline { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-    .status-pill {
+    .pill-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .pill {
+      min-height: 30px;
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      min-height: 30px;
       padding: 0 10px;
       border: 1px solid var(--line);
       border-radius: 999px;
-      background: rgba(255,255,255,.72);
       color: var(--muted);
+      background: rgba(255,255,255,.06);
       font-size: 12px;
-      white-space: nowrap;
     }
     .dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #c45a4c;
-      box-shadow: 0 0 0 4px rgba(196,90,76,.12);
+      background: var(--danger);
+      box-shadow: 0 0 0 4px rgba(255, 107, 107, .13);
     }
     .dot.ok {
-      background: #17956d;
-      box-shadow: 0 0 0 4px rgba(23,149,109,.13);
+      background: var(--lime);
+      box-shadow: 0 0 0 4px rgba(183, 255, 90, .12);
     }
-    details.key-panel {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,.62);
+    .hero {
+      display: grid;
+      align-content: center;
+      gap: 18px;
+      padding: 16px 0 6px;
+    }
+    .headline {
+      text-align: center;
+      display: grid;
+      gap: 8px;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 7vw, 86px);
+      line-height: .96;
+      font-weight: 820;
+    }
+    .accent {
+      background: linear-gradient(100deg, #fff, var(--cyan) 35%, var(--lime) 62%, var(--pink));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 15px;
+    }
+    .composer {
+      width: min(920px, 100%);
+      margin: 0 auto;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,.11), rgba(255,255,255,.065));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
       overflow: hidden;
     }
-    details.key-panel summary {
-      min-height: 42px;
-      padding: 0 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      cursor: pointer;
-      font-weight: 680;
-    }
-    .key-panel-body { display: grid; gap: 12px; padding: 0 12px 12px; }
-    .summary-copy { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 520; }
-    .field { display: grid; gap: 6px; }
-    label { color: var(--muted); font-size: 12px; font-weight: 640; }
-    input, textarea, select {
+    .composer textarea {
       width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,.87);
-      color: var(--text);
-      outline: none;
-      padding: 10px 11px;
-    }
-    textarea {
-      min-height: 340px;
+      min-height: 190px;
       resize: vertical;
+      border: 0;
+      outline: none;
+      color: var(--text);
+      background: transparent;
+      padding: 18px;
+      font-size: 15px;
     }
-    input:focus, textarea:focus, select:focus {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(20,125,115,.13);
-    }
-    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-    .segmented {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 6px;
-    }
-    .segmented.two { grid-template-columns: repeat(2, 1fr); }
-    .segmented button {
-      min-height: 40px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,.72);
-      color: var(--muted);
-      cursor: pointer;
-    }
-    .segmented button.active {
-      border-color: var(--accent);
-      background: linear-gradient(180deg, rgba(226,242,239,.96), rgba(214,233,230,.92));
-      color: var(--accent);
-      font-weight: 680;
-    }
-    .media-box {
+    .composer textarea::placeholder { color: #7f8795; }
+    .controls {
       display: grid;
       gap: 12px;
-      padding: 12px;
-      border: 1px dashed rgba(42,76,86,.28);
-      border-radius: 8px;
-      background: rgba(255,255,255,.58);
+      padding: 0 14px 14px;
     }
-    .upload-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto auto;
-      gap: 8px;
-      align-items: center;
-    }
-    .upload-row input[type="file"] {
-      padding: 8px;
-      min-width: 0;
-    }
-    .upload-status {
-      color: var(--muted);
-      font-size: 12px;
-      min-height: 18px;
-      overflow-wrap: anywhere;
-    }
-    .toolbar {
+    .params, .actions, .asset-grid {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding-top: 12px;
-      border-top: 1px solid var(--line);
+      gap: 8px;
+      flex-wrap: wrap;
     }
-    .btn {
-      min-height: 40px;
-      padding: 0 14px;
+    .select, .input, .btn, .file-btn {
+      min-height: 38px;
       border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,.75);
+      border-radius: 10px;
       color: var(--text);
-      cursor: pointer;
-      text-decoration: none;
+      background: rgba(8, 10, 14, .52);
+      outline: none;
+    }
+    .select, .input {
+      padding: 0 10px;
+    }
+    .input.small { width: 72px; }
+    .input.url { min-width: min(360px, 100%); flex: 1; }
+    .btn, .file-btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      gap: 6px;
+      padding: 0 12px;
+      cursor: pointer;
+      text-decoration: none;
     }
     .btn.primary {
       min-width: 126px;
-      border-color: var(--accent);
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      color: #fff;
-      font-weight: 680;
+      border-color: rgba(52, 214, 255, .58);
+      background: linear-gradient(135deg, var(--cyan), var(--pink));
+      font-weight: 760;
+      color: #080a0f;
     }
-    .btn:disabled { opacity: .58; cursor: not-allowed; }
-    .note {
-      color: var(--muted);
-      font-size: 12px;
-      padding: 8px 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--soft);
-    }
-    video {
-      width: 100%;
-      aspect-ratio: 16 / 9;
-      background: #0d1212;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-    }
-    .last-frame {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      display: block;
-    }
-    .jobbox {
-      min-height: 118px;
+    .btn:disabled { opacity: .56; cursor: not-allowed; }
+    .asset-panel {
       display: grid;
       gap: 8px;
-      align-content: start;
-      padding: 12px;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      background: rgba(0,0,0,.18);
+    }
+    .asset-title {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .asset-grid {
+      align-items: stretch;
+    }
+    .asset {
+      min-width: min(210px, 100%);
+      flex: 1;
+      display: grid;
+      gap: 7px;
+    }
+    .asset label, .field label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .upload-line {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px;
+    }
+    input[type="file"] {
+      min-width: 0;
+      padding: 7px;
+    }
+    .status {
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .toggles {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .toggles input { width: auto; margin-right: 6px; }
+    .actions {
+      justify-content: space-between;
+      border-top: 1px solid rgba(255,255,255,.12);
+      padding-top: 12px;
+    }
+    .panel-row {
+      width: min(920px, 100%);
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+      gap: 12px;
+    }
+    .panel {
       border: 1px solid var(--line);
-      border-radius: 8px;
-      background: linear-gradient(135deg, rgba(49,91,149,.09), transparent 42%), rgba(244,248,247,.78);
+      border-radius: 14px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel-inner {
+      padding: 13px;
+      display: grid;
+      gap: 10px;
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 13px;
+    }
+    video, .last-frame {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #05070a;
+      display: block;
+    }
+    video { aspect-ratio: 16 / 9; }
+    .jobbox {
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
       overflow-wrap: anywhere;
     }
     .progress {
       height: 7px;
       border-radius: 999px;
-      background: #dce5e2;
       overflow: hidden;
+      background: rgba(255,255,255,.12);
     }
     .bar {
       height: 100%;
       width: 0;
-      background: linear-gradient(90deg, var(--accent), var(--accent-2), var(--amber));
-      transition: width .3s ease;
+      background: linear-gradient(90deg, var(--cyan), var(--lime), var(--pink));
+      transition: width .25s ease;
+    }
+    details {
+      width: min(920px, 100%);
+      margin: 0 auto;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 14px;
+      background: rgba(10, 12, 18, .52);
+      overflow: hidden;
+    }
+    summary {
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 0 14px;
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .settings {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      padding: 0 14px 14px;
+    }
+    .field { display: grid; gap: 6px; min-width: 0; }
+    .field input, .field select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0 10px;
+      color: var(--text);
+      background: rgba(8, 10, 14, .52);
+      outline: none;
     }
     .history {
       display: grid;
       gap: 8px;
-      margin-top: 12px;
+      max-height: 260px;
+      overflow: auto;
     }
     .history a {
       display: grid;
       gap: 3px;
-      padding: 9px 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel-strong);
+      padding: 9px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 10px;
       color: var(--text);
       text-decoration: none;
+      background: rgba(255,255,255,.05);
       overflow-wrap: anywhere;
     }
     .muted { color: var(--muted); }
     .small { font-size: 12px; }
     .hidden { display: none !important; }
-    @media (max-width: 1120px) {
-      .app { grid-template-columns: 1fr; }
-      .sidebar, .result { position: static; max-height: none; }
+    @media (max-width: 880px) {
+      .panel-row { grid-template-columns: 1fr; }
+      .settings { grid-template-columns: 1fr; }
+      .actions { align-items: stretch; }
+      .btn.primary { width: 100%; }
     }
   </style>
 </head>
 <body>
-  <div class="app">
-    <aside class="panel sidebar stack">
-      <div class="topline">
-        <div>
-          <h1>Seedance 2.0</h1>
-          <h2>Volcengine Ark</h2>
-        </div>
-        <span class="status-pill"><span id="keyDot" class="dot"></span><span id="keyStatus">未配置</span></span>
+  <div class="shell">
+    <header class="nav">
+      <div class="brand"><span class="mark"></span><span>Seedance Studio</span></div>
+      <div class="pill-row">
+        <span class="pill"><span id="keyDot" class="dot"></span><span id="keyStatus">Ark 未配置</span></span>
+        <span class="pill"><span id="storageDot" class="dot"></span><span id="storageStatus">TOS 未配置</span></span>
       </div>
+    </header>
 
-      <details class="key-panel" id="keyPanel">
-        <summary>
-          <span>Key 配置</span>
-          <span class="summary-copy">点击展开</span>
-        </summary>
-        <div class="key-panel-body">
-          <div class="field">
-            <label for="apiKey">Ark API Key</label>
-            <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="ark-..." />
-          </div>
-          <div class="field">
-            <label for="keyFile">导入 Key 文件</label>
-            <input id="keyFile" type="file" accept=".txt,.env,.json,text/plain,application/json" />
-          </div>
-          <label><input id="saveKey" type="checkbox" style="width:auto;margin-right:6px" />保存到本机配置</label>
-          <button id="saveConfig" class="btn">保存配置</button>
-        </div>
-      </details>
+    <main class="hero">
+      <section class="headline">
+        <h1><span class="accent">一键生成电影级视频</span></h1>
+        <div class="subtitle">输入 Prompt，上传参考图 / 视频 / 音频，自动提交到 Doubao Seedance 2.0</div>
+      </section>
 
-      <details class="key-panel" id="storagePanel">
-        <summary>
-          <span>TOS 图片上传</span>
-          <span class="summary-copy" id="storageStatus">未配置</span>
-        </summary>
-        <div class="key-panel-body">
-          <div class="field">
-            <label for="tosAccessKey">TOS Access Key ID</label>
-            <input id="tosAccessKey" autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="field">
-            <label for="tosSecretKey">TOS Secret Access Key</label>
-            <input id="tosSecretKey" type="password" autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="field">
-            <label for="tosBucket">Bucket</label>
-            <input id="tosBucket" placeholder="your-bucket" />
-          </div>
-          <div class="grid-2">
-            <div class="field">
-              <label for="tosRegion">Region</label>
-              <input id="tosRegion" value="cn-beijing" />
-            </div>
-            <div class="field">
-              <label for="tosEndpoint">Endpoint</label>
-              <input id="tosEndpoint" value="tos-cn-beijing.volces.com" />
-            </div>
-          </div>
-          <div class="grid-2">
-            <div class="field">
-              <label for="tosPrefix">对象前缀</label>
-              <input id="tosPrefix" value="seedance-references" />
-            </div>
-            <div class="field">
-              <label for="tosUrlMode">URL 模式</label>
-              <select id="tosUrlMode">
-                <option value="signed">预签名 URL</option>
-                <option value="public">公开 URL</option>
-              </select>
-            </div>
-          </div>
-          <div class="grid-2">
-            <div class="field">
-              <label for="tosSignedExpires">预签名有效期</label>
-              <input id="tosSignedExpires" type="number" value="86400" />
-            </div>
-            <div class="field">
-              <label for="tosPublicBase">公开 Base URL</label>
-              <input id="tosPublicBase" placeholder="可选 CDN/自定义域名" />
-            </div>
-          </div>
-          <div class="field">
-            <label for="tosFile">导入 TOS 配置文件</label>
-            <input id="tosFile" type="file" accept=".txt,.env,.json,text/plain,application/json" />
-          </div>
-          <label><input id="saveStorage" type="checkbox" style="width:auto;margin-right:6px" />保存到本机配置</label>
-          <button id="saveStorageConfig" class="btn">保存 TOS 配置</button>
-        </div>
-      </details>
-
-      <div class="stack">
-        <h3>模型</h3>
-        <div class="field">
-          <label for="model">生成模型</label>
-          <select id="model"></select>
-        </div>
-        <div class="note" id="modelSource"></div>
-        <div class="grid-2">
-          <div class="field">
-            <label for="duration">时长</label>
-            <input id="duration" type="number" min="4" max="15" value="5" />
-          </div>
-          <div class="field">
-            <label for="resolution">分辨率</label>
-            <select id="resolution">
+      <section class="composer">
+        <textarea id="prompt" spellcheck="false" placeholder="描述你想生成的画面、镜头、动作和声音。可以写：首帧为图片1，参考视频1的构图，音频1作为背景音乐。"></textarea>
+        <div class="controls">
+          <div class="params">
+            <select id="model" class="select"></select>
+            <select id="resolution" class="select">
               <option>1080p</option>
+              <option>4k</option>
               <option>720p</option>
               <option>480p</option>
             </select>
+            <select id="ratio" class="select">
+              <option>16:9</option>
+              <option>9:16</option>
+              <option>1:1</option>
+              <option>adaptive</option>
+              <option>4:3</option>
+              <option>3:4</option>
+              <option>21:9</option>
+            </select>
+            <input id="duration" class="input small" type="number" min="4" max="15" value="5" title="时长" />
+            <input id="seed" class="input small" type="number" value="-1" title="Seed" />
+          </div>
+
+          <div class="asset-panel">
+            <div class="asset-title"><span>参考素材</span><span>图片最多 4 张，视频/音频各 1 个</span></div>
+            <div class="asset-grid">
+              <div class="asset">
+                <label for="imageFile1">图片1</label>
+                <input id="imageUrl1" class="input url" placeholder="图片 URL 或上传后自动填入" />
+                <div class="upload-line">
+                  <input id="imageFile1" type="file" accept="image/png,image/jpeg,image/webp" />
+                  <button type="button" class="btn" data-upload-kind="image" data-upload-slot="1">上传</button>
+                </div>
+                <div id="imageUpload1" class="status"></div>
+              </div>
+              <div class="asset">
+                <label for="imageFile2">图片2</label>
+                <input id="imageUrl2" class="input url" placeholder="图片 URL 或上传后自动填入" />
+                <div class="upload-line">
+                  <input id="imageFile2" type="file" accept="image/png,image/jpeg,image/webp" />
+                  <button type="button" class="btn" data-upload-kind="image" data-upload-slot="2">上传</button>
+                </div>
+                <div id="imageUpload2" class="status"></div>
+              </div>
+              <div class="asset">
+                <label for="imageFile3">图片3</label>
+                <input id="imageUrl3" class="input url" placeholder="图片 URL 或上传后自动填入" />
+                <div class="upload-line">
+                  <input id="imageFile3" type="file" accept="image/png,image/jpeg,image/webp" />
+                  <button type="button" class="btn" data-upload-kind="image" data-upload-slot="3">上传</button>
+                </div>
+                <div id="imageUpload3" class="status"></div>
+              </div>
+              <div class="asset">
+                <label for="imageFile4">图片4</label>
+                <input id="imageUrl4" class="input url" placeholder="图片 URL 或上传后自动填入" />
+                <div class="upload-line">
+                  <input id="imageFile4" type="file" accept="image/png,image/jpeg,image/webp" />
+                  <button type="button" class="btn" data-upload-kind="image" data-upload-slot="4">上传</button>
+                </div>
+                <div id="imageUpload4" class="status"></div>
+              </div>
+              <div class="asset">
+                <label for="videoFile">视频1</label>
+                <input id="videoUrl" class="input url" placeholder="参考视频 URL 或上传后自动填入" />
+                <div class="upload-line">
+                  <input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/webm" />
+                  <button type="button" class="btn" data-upload-kind="video">上传</button>
+                </div>
+                <div id="videoUpload" class="status"></div>
+              </div>
+              <div class="asset">
+                <label for="audioFile">音频1</label>
+                <input id="audioUrl" class="input url" placeholder="参考音频 URL 或上传后自动填入" />
+                <div class="upload-line">
+                  <input id="audioFile" type="file" accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg" />
+                  <button type="button" class="btn" data-upload-kind="audio">上传</button>
+                </div>
+                <div id="audioUpload" class="status"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="toggles">
+            <label><input id="generateAudio" type="checkbox" />生成音频</label>
+            <label><input id="returnLastFrame" type="checkbox" />返回尾帧</label>
+            <label><input id="watermark" type="checkbox" />水印</label>
+            <label><input id="webSearch" type="checkbox" />联网搜索</label>
+          </div>
+
+          <div class="actions">
+            <span id="charCount" class="muted small">0 字</span>
+            <div class="pill-row">
+              <button id="clearForm" class="btn">清空</button>
+              <button id="generate" class="btn primary">生成视频</button>
+            </div>
           </div>
         </div>
-        <div class="field">
-          <label for="ratio">比例</label>
-          <select id="ratio">
-            <option>16:9</option>
-            <option>adaptive</option>
-            <option>9:16</option>
-            <option>1:1</option>
-            <option>4:3</option>
-            <option>3:4</option>
-            <option>21:9</option>
-          </select>
-        </div>
+      </section>
+
+      <div class="panel-row">
+        <section class="panel">
+          <div class="panel-inner">
+            <div class="panel-head"><span>生成结果</span><span id="taskCaption">等待任务</span></div>
+            <video id="video" controls class="hidden"></video>
+            <img id="lastFrame" class="last-frame hidden" alt="" />
+            <div id="job" class="jobbox">
+              <strong>未开始</strong>
+              <span class="small">提交后会自动轮询并下载到 outputs/</span>
+              <div class="progress"><div class="bar"></div></div>
+            </div>
+            <a id="download" class="btn primary hidden" download>下载 MP4</a>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-inner">
+            <div class="panel-head"><span>历史</span><button id="refreshHistory" class="btn">刷新</button></div>
+            <div id="history" class="history"></div>
+          </div>
+        </section>
       </div>
 
-      <details class="key-panel">
-        <summary>
-          <span>高级参数</span>
-          <span class="summary-copy">Seed / 音频 / 尾帧</span>
-        </summary>
-        <div class="key-panel-body">
+      <details>
+        <summary><span>高级配置</span><span id="configHint">默认读取本机配置</span></summary>
+        <div class="settings">
           <div class="field">
-            <label for="seed">Seed</label>
-            <input id="seed" type="number" value="-1" />
+            <label for="apiKey">Ark API Key</label>
+            <input id="apiKey" type="password" placeholder="默认读取本机配置" />
           </div>
-          <div class="grid-2">
-            <label><input id="generateAudio" type="checkbox" style="width:auto;margin-right:6px" />生成音频</label>
-            <label><input id="returnLastFrame" type="checkbox" style="width:auto;margin-right:6px" />返回尾帧</label>
+          <div class="field">
+            <label for="tosBucket">TOS Bucket</label>
+            <input id="tosBucket" value="miles" />
           </div>
-          <div class="grid-2">
-            <label><input id="watermark" type="checkbox" style="width:auto;margin-right:6px" />添加水印</label>
-            <label><input id="webSearch" type="checkbox" style="width:auto;margin-right:6px" />联网搜索</label>
+          <div class="field">
+            <label for="tosPrefix">TOS 前缀</label>
+            <input id="tosPrefix" value="seedance-references" />
+          </div>
+          <div class="field">
+            <label for="tosAccessKey">TOS Access Key ID</label>
+            <input id="tosAccessKey" placeholder="默认读取本机配置" />
+          </div>
+          <div class="field">
+            <label for="tosSecretKey">TOS Secret Access Key</label>
+            <input id="tosSecretKey" type="password" placeholder="默认读取本机配置" />
+          </div>
+          <div class="field">
+            <label for="tosRegion">TOS Region</label>
+            <input id="tosRegion" value="cn-beijing" />
+          </div>
+          <div class="field">
+            <label for="tosEndpoint">TOS Endpoint</label>
+            <input id="tosEndpoint" value="tos-cn-beijing.volces.com" />
+          </div>
+          <div class="field">
+            <label for="tosUrlMode">URL 模式</label>
+            <select id="tosUrlMode"><option value="signed">预签名 URL</option><option value="public">公开 URL</option></select>
+          </div>
+          <div class="field">
+            <label for="tosSignedExpires">预签名有效期</label>
+            <input id="tosSignedExpires" type="number" value="86400" />
+          </div>
+          <div class="field">
+            <label for="tosPublicBase">公开 Base URL</label>
+            <input id="tosPublicBase" placeholder="可选" />
           </div>
           <div class="field">
             <label for="safetyIdentifier">Safety Identifier</label>
             <input id="safetyIdentifier" maxlength="64" placeholder="可选" />
           </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button id="saveAllConfig" class="btn">保存本机配置</button>
+          </div>
         </div>
       </details>
-    </aside>
-
-    <main class="panel main">
-      <div class="topline">
-        <div>
-          <h1>生成任务</h1>
-          <h2 id="modeHint">文生视频</h2>
-        </div>
-        <button id="clearForm" class="btn">清空</button>
-      </div>
-
-      <div class="segmented" id="modeTabs">
-        <button type="button" data-mode="text" class="active">纯文本</button>
-        <button type="button" data-mode="image">参考图</button>
-        <button type="button" data-mode="media">多模态</button>
-      </div>
-
-      <div id="mediaSection" class="media-box hidden">
-        <div class="segmented" id="imageIntent">
-          <button type="button" data-intent="reference" class="active">参考图</button>
-          <button type="button" data-intent="first">首帧</button>
-          <button type="button" data-intent="firstTail">首尾帧</button>
-        </div>
-        <div class="grid-2">
-          <div class="field">
-            <label id="imageLabel1" for="imageUrl1">参考图 1 URL</label>
-            <input id="imageUrl1" placeholder="https://..." />
-            <div class="upload-row">
-              <input id="imageFile1" type="file" accept="image/png,image/jpeg,image/webp" />
-              <button type="button" class="btn" data-upload-slot="1">上传</button>
-              <button type="button" class="btn" data-ref-slot="1">引用</button>
-            </div>
-            <div id="imageUpload1" class="upload-status"></div>
-          </div>
-          <div class="field">
-            <label id="imageLabel2" for="imageUrl2">参考图 2 URL</label>
-            <input id="imageUrl2" placeholder="https://..." />
-            <div class="upload-row">
-              <input id="imageFile2" type="file" accept="image/png,image/jpeg,image/webp" />
-              <button type="button" class="btn" data-upload-slot="2">上传</button>
-              <button type="button" class="btn" data-ref-slot="2">引用</button>
-            </div>
-            <div id="imageUpload2" class="upload-status"></div>
-          </div>
-        </div>
-        <div class="grid-2" id="extraImageUrls">
-          <div class="field">
-            <label for="imageUrl3">参考图 3 URL</label>
-            <input id="imageUrl3" placeholder="https://..." />
-            <div class="upload-row">
-              <input id="imageFile3" type="file" accept="image/png,image/jpeg,image/webp" />
-              <button type="button" class="btn" data-upload-slot="3">上传</button>
-              <button type="button" class="btn" data-ref-slot="3">引用</button>
-            </div>
-            <div id="imageUpload3" class="upload-status"></div>
-          </div>
-          <div class="field">
-            <label for="imageUrl4">参考图 4 URL</label>
-            <input id="imageUrl4" placeholder="https://..." />
-            <div class="upload-row">
-              <input id="imageFile4" type="file" accept="image/png,image/jpeg,image/webp" />
-              <button type="button" class="btn" data-upload-slot="4">上传</button>
-              <button type="button" class="btn" data-ref-slot="4">引用</button>
-            </div>
-            <div id="imageUpload4" class="upload-status"></div>
-          </div>
-        </div>
-        <div class="grid-2" id="mediaUrls">
-          <div class="field">
-            <label for="videoUrl">参考视频 URL</label>
-            <input id="videoUrl" placeholder="https://...mp4" />
-          </div>
-          <div class="field">
-            <label for="audioUrl">参考音频 URL</label>
-            <input id="audioUrl" placeholder="https://...mp3" />
-          </div>
-        </div>
-        <div class="note">可直接选择本地图片上传到 TOS，成功后会自动填入 URL；Prompt 中可写“图片1”“图片2”引用对应槽位。</div>
-      </div>
-
-      <div class="field">
-        <label for="prompt">Prompt</label>
-        <textarea id="prompt" spellcheck="false"></textarea>
-      </div>
-
-      <div class="toolbar">
-        <span class="muted small" id="charCount">0 字</span>
-        <button id="generate" class="btn primary">生成视频</button>
-      </div>
     </main>
-
-    <aside class="panel result stack">
-      <div class="topline">
-        <div>
-          <h1>结果</h1>
-          <h2 id="taskCaption">等待任务</h2>
-        </div>
-        <button id="refreshHistory" class="btn">刷新</button>
-      </div>
-      <video id="video" controls class="hidden"></video>
-      <img id="lastFrame" class="last-frame hidden" alt="" />
-      <div id="job" class="jobbox">
-        <strong>未开始</strong>
-        <span class="muted small">配置参数后提交任务</span>
-        <div class="progress"><div class="bar"></div></div>
-      </div>
-      <a id="download" class="btn primary hidden" download>下载 MP4</a>
-      <div>
-        <h3>历史</h3>
-        <div id="history" class="history"></div>
-      </div>
-    </aside>
   </div>
 
   <script>
     const $ = (id) => document.getElementById(id);
     let models = {};
     let currentJob = null;
-    let mode = "text";
-    let imageIntent = "reference";
 
     async function api(path, options = {}) {
-      const res = await fetch(path, {
-        ...options,
-        headers: {"Content-Type": "application/json", ...(options.headers || {})}
-      });
+      const headers = options.body instanceof FormData ? (options.headers || {}) : {"Content-Type": "application/json", ...(options.headers || {})};
+      const res = await fetch(path, {...options, headers});
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "请求失败");
       return data;
-    }
-
-    function renderConfig(data) {
-      $("keyDot").classList.toggle("ok", !!data.configured);
-      $("keyStatus").textContent = data.configured ? (data.source === "env" ? "环境变量" : "已配置") : "未配置";
-      if (data.api_key) $("apiKey").placeholder = data.api_key;
     }
 
     function storagePayload() {
@@ -1165,91 +1220,25 @@ INDEX_HTML = r"""<!doctype html>
       };
     }
 
+    function renderConfig(data) {
+      $("keyDot").classList.toggle("ok", !!data.configured);
+      $("keyStatus").textContent = data.configured ? "Ark 已配置" : "Ark 未配置";
+      if (data.api_key) $("apiKey").placeholder = data.api_key;
+    }
+
     function renderStorageConfig(data) {
-      $("storageStatus").textContent = data.configured ? (data.source === "env" ? "环境变量" : "已配置") : "未配置";
+      $("storageDot").classList.toggle("ok", !!data.configured);
+      $("storageStatus").textContent = data.configured ? `TOS ${data.bucket || "已配置"}` : "TOS 未配置";
       if (data.access_key) $("tosAccessKey").placeholder = data.access_key;
       if (data.secret_key) $("tosSecretKey").placeholder = data.secret_key;
-      ["bucket", "region", "endpoint", "prefix", "signed_expires", "public_base_url"].forEach(key => {
-        const ids = {
-          bucket: "tosBucket",
-          region: "tosRegion",
-          endpoint: "tosEndpoint",
-          prefix: "tosPrefix",
-          signed_expires: "tosSignedExpires",
-          public_base_url: "tosPublicBase"
-        };
-        if (data[key] && !$(ids[key]).value) $(ids[key]).value = data[key];
-      });
+      const mapping = {bucket:"tosBucket", region:"tosRegion", endpoint:"tosEndpoint", prefix:"tosPrefix", signed_expires:"tosSignedExpires", public_base_url:"tosPublicBase"};
+      Object.entries(mapping).forEach(([key, id]) => { if (data[key] && !$(id).value) $(id).value = data[key]; });
       if (data.url_mode) $("tosUrlMode").value = data.url_mode;
-    }
-
-    function parseKeyFile(text) {
-      const trimmed = text.trim();
-      if (!trimmed) throw new Error("Key 文件为空");
-      try {
-        const data = JSON.parse(trimmed);
-        const value = data.api_key || data.ark_api_key || data.ARK_API_KEY || data.VOLC_ARK_API_KEY;
-        if (value) return String(value).trim().replace(/^Bearer\s+/i, "");
-      } catch (_) {}
-      const bearer = trimmed.match(/Bearer\s+([A-Za-z0-9._-]+)/i);
-      if (bearer) return bearer[1];
-      const direct = trimmed.match(/\b(ark-[A-Za-z0-9._-]{20,})\b/);
-      if (direct) return direct[1];
-      const lines = trimmed.split(/\r?\n/);
-      for (const line of lines) {
-        const match = line.trim().match(/^([^:=\s][^:=]*?)\s*[:=]\s*(.+)$/);
-        if (!match) continue;
-        const key = match[1].trim().toLowerCase().replace(/[\s_\-]/g, "");
-        const value = match[2].trim().replace(/^["']|["']$/g, "").replace(/^Bearer\s+/i, "");
-        if (["apikey", "arkapikey", "arkkey", "volcarkapikey"].includes(key)) return value;
-      }
-      throw new Error("没有解析到 Ark API Key");
-    }
-
-    function parseStorageFile(text) {
-      const trimmed = text.trim();
-      if (!trimmed) throw new Error("TOS 配置文件为空");
-      const result = {};
-      try {
-        const data = JSON.parse(trimmed);
-        result.tos_access_key = data.tos_access_key || data.access_key || data.AccessKeyID || data.AccessKeyId || data.TOS_ACCESSKEY || data.VOLC_ACCESSKEY || "";
-        result.tos_secret_key = data.tos_secret_key || data.secret_key || data.SecretAccessKey || data.TOS_SECRETKEY || data.VOLC_SECRETKEY || "";
-        result.tos_bucket = data.tos_bucket || data.bucket || data.TOS_BUCKET || "";
-        result.tos_region = data.tos_region || data.region || data.TOS_REGION || "";
-        result.tos_endpoint = data.tos_endpoint || data.endpoint || data.TOS_ENDPOINT || "";
-        result.tos_prefix = data.tos_prefix || data.prefix || data.TOS_PREFIX || "";
-        result.tos_url_mode = data.tos_url_mode || data.url_mode || data.TOS_URL_MODE || "";
-        result.tos_signed_expires = data.tos_signed_expires || data.signed_expires || data.TOS_SIGNED_EXPIRES || "";
-        result.tos_public_base_url = data.tos_public_base_url || data.public_base_url || data.TOS_PUBLIC_BASE_URL || "";
-      } catch (_) {}
-      const lines = trimmed.split(/\r?\n/);
-      for (const line of lines) {
-        const clean = line.trim();
-        if (!clean || clean.startsWith("#")) continue;
-        const match = clean.match(/^([^:=\s][^:=]*?)\s*[:=]\s*(.+)$/);
-        if (!match) continue;
-        const key = match[1].trim().toLowerCase().replace(/[\s_\-]/g, "");
-        const value = match[2].trim().replace(/^["']|["']$/g, "");
-        if (["accesskeyid", "accesskey", "ak", "tosaccesskey", "tosaccesskeyid", "volcaccesskey"].includes(key)) result.tos_access_key = value;
-        if (["secretaccesskey", "secretkey", "sk", "tossecretkey", "volcsecretkey"].includes(key)) result.tos_secret_key = value;
-        if (["bucket", "tosbucket"].includes(key)) result.tos_bucket = value;
-        if (["region", "tosregion"].includes(key)) result.tos_region = value;
-        if (["endpoint", "tosendpoint"].includes(key)) result.tos_endpoint = value;
-        if (["prefix", "tosprefix"].includes(key)) result.tos_prefix = value;
-        if (["urlmode", "tosurlmode"].includes(key)) result.tos_url_mode = value;
-        if (["signedexpires", "tossignedexpires"].includes(key)) result.tos_signed_expires = value;
-        if (["publicbaseurl", "tospublicbaseurl"].includes(key)) result.tos_public_base_url = value;
-      }
-      if (!result.tos_access_key && !result.tos_secret_key && !result.tos_bucket) throw new Error("没有解析到 TOS 配置");
-      return result;
     }
 
     function renderModels(data) {
       models = data.models;
-      $("model").innerHTML = Object.entries(models).map(([key, model]) =>
-        `<option value="${key}">${model.label}</option>`
-      ).join("");
-      $("modelSource").textContent = data.source || "";
+      $("model").innerHTML = Object.entries(models).map(([key, model]) => `<option value="${key}">${model.label}</option>`).join("");
       updateModelFields();
     }
 
@@ -1259,40 +1248,12 @@ INDEX_HTML = r"""<!doctype html>
         option.disabled = model.resolutions && !model.resolutions.includes(option.value);
       });
       if (model.resolutions && !model.resolutions.includes($("resolution").value)) {
-        $("resolution").value = model.resolutions[model.resolutions.length - 1];
+        $("resolution").value = model.resolutions.includes("1080p") ? "1080p" : model.resolutions[model.resolutions.length - 1];
       }
     }
 
-    function setMode(next) {
-      mode = next;
-      document.querySelectorAll("#modeTabs button").forEach(btn => btn.classList.toggle("active", btn.dataset.mode === mode));
-      $("mediaSection").classList.toggle("hidden", mode === "text");
-      $("mediaUrls").classList.toggle("hidden", mode !== "media");
-      $("extraImageUrls").classList.toggle("hidden", mode !== "media" || imageIntent !== "reference");
-      $("modeHint").textContent = mode === "text" ? "文生视频" : mode === "image" ? "参考图生成" : "多模态参考生成";
-      updateImageIntent();
-    }
-
-    function updateImageIntent() {
-      document.querySelectorAll("#imageIntent button").forEach(btn => btn.classList.toggle("active", btn.dataset.intent === imageIntent));
-      const firstTail = imageIntent === "firstTail";
-      $("imageLabel1").textContent = imageIntent === "reference" ? "参考图 1 URL" : "首帧图 URL";
-      $("imageLabel2").textContent = firstTail ? "尾帧图 URL" : "参考图 2 URL";
-      $("extraImageUrls").classList.toggle("hidden", mode !== "media" || imageIntent !== "reference");
-    }
-
     function progressFor(status) {
-      return {
-        created: 8,
-        submitting: 18,
-        queued: 36,
-        running: 68,
-        succeeded: 100,
-        failed: 100,
-        expired: 100,
-        cancelled: 100,
-        error: 100
-      }[status] || 48;
+      return {created:8, submitting:18, queued:36, running:68, succeeded:100, failed:100, expired:100, cancelled:100, error:100}[status] || 48;
     }
 
     function resetJobView() {
@@ -1306,10 +1267,10 @@ INDEX_HTML = r"""<!doctype html>
 
     function renderJob(job) {
       const pct = progressFor(job.status);
-      $("taskCaption").textContent = job.task_id ? `Task ${job.task_id}` : job.model;
+      $("taskCaption").textContent = job.task_id ? `Task ${job.task_id}` : (job.model || "等待任务");
       $("job").innerHTML = `
         <strong>${job.message || job.status}</strong>
-        <span class="muted small">${job.model_id || job.model || ""}</span>
+        <span class="small">${job.model_id || job.model || ""}</span>
         ${job.task_id ? `<span class="small">task_id: ${job.task_id}</span>` : ""}
         <div class="progress"><div class="bar" style="width:${pct}%"></div></div>
       `;
@@ -1351,59 +1312,31 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function imageUrls() {
-      if (mode === "text") return [];
-      const ids = imageIntent === "firstTail" ? ["imageUrl1", "imageUrl2"] : ["imageUrl1", "imageUrl2", "imageUrl3", "imageUrl4"];
-      return ids.map(id => $(id).value.trim()).filter(Boolean);
+      return ["imageUrl1", "imageUrl2", "imageUrl3", "imageUrl4"].map(id => $(id).value.trim()).filter(Boolean);
     }
 
-    async function fileToDataUrl(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
-
-    function insertPromptRef(slot) {
-      const prompt = $("prompt");
-      const text = `图片${slot}`;
-      const start = prompt.selectionStart || prompt.value.length;
-      const end = prompt.selectionEnd || prompt.value.length;
-      const before = prompt.value.slice(0, start);
-      const after = prompt.value.slice(end);
-      const spacerBefore = before && !/\s$/.test(before) ? " " : "";
-      const spacerAfter = after && !/^\s/.test(after) ? " " : "";
-      prompt.value = `${before}${spacerBefore}${text}${spacerAfter}${after}`;
-      const pos = before.length + spacerBefore.length + text.length;
-      prompt.focus();
-      prompt.setSelectionRange(pos, pos);
-      $("charCount").textContent = `${prompt.value.length} 字`;
-    }
-
-    async function uploadReference(slot) {
-      const fileInput = $(`imageFile${slot}`);
-      const status = $(`imageUpload${slot}`);
+    async function uploadReference(kind, slot = "") {
+      const ids = kind === "image" ? {file:`imageFile${slot}`, url:`imageUrl${slot}`, status:`imageUpload${slot}`} :
+        kind === "video" ? {file:"videoFile", url:"videoUrl", status:"videoUpload"} :
+        {file:"audioFile", url:"audioUrl", status:"audioUpload"};
+      const fileInput = $(ids.file);
+      const status = $(ids.status);
       const file = fileInput.files[0];
       if (!file) {
-        status.textContent = "请选择本地图片";
+        status.textContent = `请选择${kind === "image" ? "图片" : kind === "video" ? "视频" : "音频"}`;
         return;
       }
-      const button = document.querySelector(`[data-upload-slot="${slot}"]`);
+      const button = document.querySelector(`[data-upload-kind="${kind}"]${slot ? `[data-upload-slot="${slot}"]` : ""}`);
       button.disabled = true;
       status.textContent = "上传中...";
       try {
-        const data = await api("/api/upload-reference", {
-          method: "POST",
-          body: JSON.stringify({
-            file_name: file.name,
-            content_type: file.type,
-            data_url: await fileToDataUrl(file),
-            storage: storagePayload()
-          })
-        });
-        $(`imageUrl${slot}`).value = data.url;
-        status.textContent = `已上传：图片${slot} · ${(data.size / 1024 / 1024).toFixed(2)} MB`;
+        const form = new FormData();
+        form.append("file", file);
+        Object.entries(storagePayload()).forEach(([key, value]) => form.append(key, value));
+        const data = await api("/api/upload-reference", {method: "POST", body: form});
+        $(ids.url).value = data.url;
+        const label = kind === "image" ? `图片${slot}` : kind === "video" ? "视频1" : "音频1";
+        status.textContent = `已上传：${label} · ${(data.size / 1024 / 1024).toFixed(2)} MB`;
       } catch (err) {
         status.textContent = err.message;
       } finally {
@@ -1428,10 +1361,8 @@ INDEX_HTML = r"""<!doctype html>
         web_search: $("webSearch").checked,
         safety_identifier: $("safetyIdentifier").value.trim(),
         image_urls: imageUrls(),
-        video_url: mode === "media" ? $("videoUrl").value.trim() : "",
-        audio_url: mode === "media" ? $("audioUrl").value.trim() : "",
-        input_mode: mode,
-        image_intent: imageIntent
+        video_url: $("videoUrl").value.trim(),
+        audio_url: $("audioUrl").value.trim()
       };
       try {
         const job = await api("/api/generate", {method: "POST", body: JSON.stringify(payload)});
@@ -1443,91 +1374,30 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
 
-    $("saveConfig").addEventListener("click", async () => {
-      try {
-        const data = await api("/api/config", {
-          method: "POST",
-          body: JSON.stringify({api_key: $("apiKey").value.trim(), save: $("saveKey").checked})
-        });
+    async function saveAllConfig() {
+      if ($("apiKey").value.trim()) {
+        await api("/api/config", {method:"POST", body: JSON.stringify({api_key: $("apiKey").value.trim(), save: true})});
         $("apiKey").value = "";
-        renderConfig(data);
-      } catch (err) {
-        alert(err.message);
       }
-    });
-    $("keyFile").addEventListener("change", async (event) => {
-      const file = event.target.files[0];
-      if (!file) return;
-      try {
-        $("apiKey").value = parseKeyFile(await file.text());
-        $("keyStatus").textContent = "已导入";
-        $("keyDot").classList.add("ok");
-      } catch (err) {
-        alert(err.message);
-      } finally {
-        event.target.value = "";
-      }
-    });
-    $("saveStorageConfig").addEventListener("click", async () => {
-      try {
-        const data = await api("/api/storage/config", {
-          method: "POST",
-          body: JSON.stringify({...storagePayload(), save: $("saveStorage").checked})
-        });
-        $("tosAccessKey").value = "";
-        $("tosSecretKey").value = "";
-        renderStorageConfig(data);
-      } catch (err) {
-        alert(err.message);
-      }
-    });
-    $("tosFile").addEventListener("change", async (event) => {
-      const file = event.target.files[0];
-      if (!file) return;
-      try {
-        const data = parseStorageFile(await file.text());
-        if (data.tos_access_key) $("tosAccessKey").value = data.tos_access_key;
-        if (data.tos_secret_key) $("tosSecretKey").value = data.tos_secret_key;
-        if (data.tos_bucket) $("tosBucket").value = data.tos_bucket;
-        if (data.tos_region) $("tosRegion").value = data.tos_region;
-        if (data.tos_endpoint) $("tosEndpoint").value = data.tos_endpoint;
-        if (data.tos_prefix) $("tosPrefix").value = data.tos_prefix;
-        if (data.tos_url_mode) $("tosUrlMode").value = data.tos_url_mode;
-        if (data.tos_signed_expires) $("tosSignedExpires").value = data.tos_signed_expires;
-        if (data.tos_public_base_url) $("tosPublicBase").value = data.tos_public_base_url;
-        $("storageStatus").textContent = "已导入";
-      } catch (err) {
-        alert(err.message);
-      } finally {
-        event.target.value = "";
-      }
-    });
+      const storage = await api("/api/storage/config", {method:"POST", body: JSON.stringify({...storagePayload(), save: true})});
+      renderStorageConfig(storage);
+      renderConfig(await api("/api/config"));
+    }
+
     $("model").addEventListener("change", updateModelFields);
-    $("modeTabs").addEventListener("click", (event) => {
-      const btn = event.target.closest("button");
-      if (btn) setMode(btn.dataset.mode);
-    });
-    $("imageIntent").addEventListener("click", (event) => {
-      const btn = event.target.closest("button");
-      if (!btn) return;
-      imageIntent = btn.dataset.intent;
-      updateImageIntent();
-    });
     $("generate").addEventListener("click", generate);
-    document.querySelectorAll("[data-upload-slot]").forEach(button => {
-      button.addEventListener("click", () => uploadReference(button.dataset.uploadSlot));
-    });
-    document.querySelectorAll("[data-ref-slot]").forEach(button => {
-      button.addEventListener("click", () => insertPromptRef(button.dataset.refSlot));
-    });
-    $("refreshHistory").addEventListener("click", loadHistory);
-    $("prompt").addEventListener("input", () => $("charCount").textContent = `${$("prompt").value.length} 字`);
     $("clearForm").addEventListener("click", () => {
       $("prompt").value = "";
-      ["imageUrl1", "imageUrl2", "imageUrl3", "imageUrl4", "videoUrl", "audioUrl"].forEach(id => $(id).value = "");
-      ["imageFile1", "imageFile2", "imageFile3", "imageFile4"].forEach(id => $(id).value = "");
-      ["imageUpload1", "imageUpload2", "imageUpload3", "imageUpload4"].forEach(id => $(id).textContent = "");
+      ["imageUrl1","imageUrl2","imageUrl3","imageUrl4","videoUrl","audioUrl"].forEach(id => $(id).value = "");
+      ["imageFile1","imageFile2","imageFile3","imageFile4","videoFile","audioFile"].forEach(id => $(id).value = "");
+      ["imageUpload1","imageUpload2","imageUpload3","imageUpload4","videoUpload","audioUpload"].forEach(id => $(id).textContent = "");
       $("charCount").textContent = "0 字";
+    });
+    $("prompt").addEventListener("input", () => $("charCount").textContent = `${$("prompt").value.length} 字`);
+    $("refreshHistory").addEventListener("click", loadHistory);
+    $("saveAllConfig").addEventListener("click", () => saveAllConfig().catch(err => alert(err.message)));
+    document.querySelectorAll("[data-upload-kind]").forEach(button => {
+      button.addEventListener("click", () => uploadReference(button.dataset.uploadKind, button.dataset.uploadSlot || ""));
     });
 
     Promise.all([
