@@ -1,4 +1,5 @@
 __pycache__/
+.env
 .jimeng_config.json
 .seedance_config.json
 outputs/

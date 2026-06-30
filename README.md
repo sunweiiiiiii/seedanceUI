@@ -53,6 +53,11 @@ python app.py
 - 使用环境变量启动。
 - 手动维护本机 `.seedance_config.json`。
 
+仓库内提供两个不含真实密钥的模板：
+
+- `.env.example`
+- `.seedance_config.example.json`
+
 Ark Key 环境变量：
 
 ```powershell
@@ -72,6 +77,18 @@ python app.py
 ```
 
 本项目默认桶名可使用 `miles`，对象前缀默认 `seedance-references`。
+
+也可以在部署机器上通过环境变量生成本机配置文件：
+
+```bash
+export ARK_API_KEY="ark-..."
+export TOS_ACCESSKEY="AKLT..."
+export TOS_SECRETKEY="..."
+export TOS_BUCKET="miles"
+python scripts/write_local_config.py
+```
+
+生成的 `.seedance_config.json` 只保存在当前机器，默认不会提交到 Git。
 
 ## TOS 参考素材上传
 
@@ -144,6 +161,22 @@ python app.py
 ```
 
 默认监听 `127.0.0.1:7860`。如果要公网访问，建议放在 Nginx/Caddy 后面，并给页面加访问控制。
+
+如果只是给局域网其他设备访问同一台后端服务，可以让服务监听所有网卡：
+
+```bash
+export SEEDANCE_UI_HOST="0.0.0.0"
+export SEEDANCE_UI_PORT="7860"
+python app.py
+```
+
+然后其他设备访问：
+
+```text
+http://运行后端机器的局域网IP:7860
+```
+
+注意不要在其他设备打开 `127.0.0.1:7860`，因为 `127.0.0.1` 永远指向那台设备自己。
 
 ## 安全说明
 

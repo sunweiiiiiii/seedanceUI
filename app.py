@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 OUTPUTS = ROOT / "outputs"
 STATIC = ROOT / "static"
 CONFIG_PATH = ROOT / ".seedance_config.json"
-HOST = "127.0.0.1"
+HOST = os.environ.get("SEEDANCE_UI_HOST") or os.environ.get("JIMENG_UI_HOST") or "127.0.0.1"
 PORT = int(os.environ.get("SEEDANCE_UI_PORT") or os.environ.get("JIMENG_UI_PORT") or "7860")
 
 

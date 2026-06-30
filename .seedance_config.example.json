@@ -1,0 +1,12 @@
+{
+  "api_key": "ark-...",
+  "tos_access_key": "AKLT...",
+  "tos_secret_key": "...",
+  "tos_bucket": "miles",
+  "tos_region": "cn-beijing",
+  "tos_endpoint": "tos-cn-beijing.volces.com",
+  "tos_prefix": "seedance-references",
+  "tos_url_mode": "signed",
+  "tos_signed_expires": "86400",
+  "tos_public_base_url": ""
+}
