@@ -790,6 +790,7 @@ INDEX_HTML = r"""<!doctype html>
       backdrop-filter: blur(18px);
       -webkit-backdrop-filter: blur(18px);
       overflow: hidden;
+      position: relative;
     }
     .composer textarea {
       width: 100%;
@@ -844,6 +845,73 @@ INDEX_HTML = r"""<!doctype html>
       color: #080a0f;
     }
     .btn:disabled { opacity: .56; cursor: not-allowed; }
+    .mention-trigger {
+      min-width: 38px;
+      font-weight: 800;
+      color: var(--cyan);
+    }
+    .mention-menu {
+      position: absolute;
+      left: 18px;
+      top: 66px;
+      z-index: 20;
+      width: min(330px, calc(100% - 36px));
+      max-height: 285px;
+      overflow: auto;
+      padding: 8px;
+      border: 1px solid rgba(52, 214, 255, .28);
+      border-radius: 12px;
+      background: rgba(12, 14, 20, .96);
+      box-shadow: 0 20px 70px rgba(0, 0, 0, .42);
+    }
+    .mention-item {
+      width: 100%;
+      min-height: 52px;
+      border: 0;
+      border-radius: 10px;
+      padding: 8px 10px;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      color: var(--text);
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+    .mention-item:hover, .mention-item.active {
+      background: rgba(52, 214, 255, .12);
+    }
+    .mention-item:disabled {
+      cursor: not-allowed;
+      opacity: .45;
+    }
+    .mention-token {
+      min-width: 52px;
+      min-height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      color: #071017;
+      background: linear-gradient(135deg, var(--cyan), var(--lime));
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .mention-meta {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+      overflow-wrap: anywhere;
+    }
+    .mention-name {
+      font-size: 13px;
+      font-weight: 760;
+    }
+    .mention-url {
+      color: var(--muted);
+      font-size: 12px;
+    }
     .asset-panel {
       display: grid;
       gap: 8px;
@@ -1036,7 +1104,8 @@ INDEX_HTML = r"""<!doctype html>
       </section>
 
       <section class="composer">
-        <textarea id="prompt" spellcheck="false" placeholder="描述你想生成的画面、镜头、动作和声音。可以写：首帧为图片1，参考视频1的构图，音频1作为背景音乐。"></textarea>
+        <textarea id="prompt" spellcheck="false" placeholder="使用 @ 快速引用参考内容，例如：@图片1 模仿 @视频1 的动作，音色参考 @音频1。"></textarea>
+        <div id="mentionMenu" class="mention-menu hidden"></div>
         <div class="controls">
           <div class="params">
             <select id="model" class="select"></select>
@@ -1057,10 +1126,11 @@ INDEX_HTML = r"""<!doctype html>
             </select>
             <input id="duration" class="input small" type="number" min="4" max="15" value="5" title="时长" />
             <input id="seed" class="input small" type="number" value="-1" title="Seed" />
+            <button id="mentionButton" class="btn mention-trigger" type="button" title="引用素材">@</button>
           </div>
 
           <div class="asset-panel">
-            <div class="asset-title"><span>参考素材</span><span>图片最多 4 张，视频/音频各 1 个</span></div>
+            <div class="asset-title"><span>参考素材</span><span>使用 @图片1 / @视频1 / @音频1 引用</span></div>
             <div class="asset-grid">
               <div class="asset">
                 <label for="imageFile1">图片1</label>
@@ -1332,8 +1402,114 @@ INDEX_HTML = r"""<!doctype html>
       `).join("") || `<span class="muted small">暂无历史</span>`;
     }
 
-    function imageUrls() {
-      return ["imageUrl1", "imageUrl2", "imageUrl3", "imageUrl4"].map(id => $(id).value.trim()).filter(Boolean);
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    function referenceItems() {
+      return [
+        {kind:"image", token:"@图片1", label:"图片1", urlId:"imageUrl1", statusId:"imageUpload1"},
+        {kind:"image", token:"@图片2", label:"图片2", urlId:"imageUrl2", statusId:"imageUpload2"},
+        {kind:"image", token:"@图片3", label:"图片3", urlId:"imageUrl3", statusId:"imageUpload3"},
+        {kind:"image", token:"@图片4", label:"图片4", urlId:"imageUrl4", statusId:"imageUpload4"},
+        {kind:"video", token:"@视频1", label:"视频1", urlId:"videoUrl", statusId:"videoUpload"},
+        {kind:"audio", token:"@音频1", label:"音频1", urlId:"audioUrl", statusId:"audioUpload"}
+      ].map(item => ({...item, url: () => $(item.urlId).value.trim()}));
+    }
+
+    function shortUrl(url) {
+      if (!url) return "未填写 URL，选择后可先插入占位引用";
+      return url.replace(/^https?:\/\//, "").slice(0, 58);
+    }
+
+    function updateReferenceState() {
+      referenceItems().forEach(item => {
+        const status = $(item.statusId);
+        const text = status.textContent.trim();
+        if (item.url()) {
+          if (!text || text.startsWith("可引用")) status.textContent = `可引用 ${item.token}`;
+        } else if (text.startsWith("可引用")) {
+          status.textContent = "";
+        }
+      });
+    }
+
+    function mentionContext() {
+      const input = $("prompt");
+      const pos = input.selectionStart;
+      const before = input.value.slice(0, pos);
+      const at = before.lastIndexOf("@");
+      if (at < 0) return null;
+      const query = before.slice(at + 1);
+      if (/[\s，。；：、,.!?]/.test(query)) return null;
+      return {start: at, end: pos, query};
+    }
+
+    function hideMentionMenu() {
+      $("mentionMenu").classList.add("hidden");
+      $("mentionMenu").innerHTML = "";
+    }
+
+    function showMentionMenu(query = "") {
+      const normalized = query.trim().toLowerCase();
+      const items = referenceItems().filter(item => {
+        const haystack = `${item.token} ${item.label} ${item.kind}`.toLowerCase();
+        return !normalized || haystack.includes(normalized);
+      });
+      $("mentionMenu").innerHTML = items.map(item => `
+        <button type="button" class="mention-item" data-token="${escapeHtml(item.token)}">
+          <span class="mention-token">${escapeHtml(item.token)}</span>
+          <span class="mention-meta">
+            <span class="mention-name">${escapeHtml(item.label)}</span>
+            <span class="mention-url">${escapeHtml(shortUrl(item.url()))}</span>
+          </span>
+        </button>
+      `).join("") || `<div class="mention-item"><span class="mention-meta"><span class="mention-name">没有匹配的素材</span></span></div>`;
+      $("mentionMenu").classList.remove("hidden");
+      document.querySelectorAll("[data-token]").forEach(button => {
+        button.addEventListener("mousedown", event => {
+          event.preventDefault();
+          insertMention(button.dataset.token);
+        });
+      });
+    }
+
+    function insertMention(token) {
+      const input = $("prompt");
+      const ctx = mentionContext();
+      const start = ctx ? ctx.start : input.selectionStart;
+      const end = ctx ? ctx.end : input.selectionEnd;
+      const prefix = input.value.slice(0, start);
+      const suffix = input.value.slice(end);
+      const spacer = suffix.startsWith(" ") || suffix === "" ? "" : " ";
+      input.value = `${prefix}${token}${spacer}${suffix}`;
+      const cursor = prefix.length + token.length + spacer.length;
+      input.focus();
+      input.setSelectionRange(cursor, cursor);
+      $("charCount").textContent = `${input.value.length} 字`;
+      hideMentionMenu();
+    }
+
+    function selectedReferences() {
+      updateReferenceState();
+      const text = $("prompt").value;
+      const items = referenceItems();
+      const filled = items.filter(item => item.url());
+      const mentioned = items.filter(item => text.includes(item.token));
+      if (filled.length && !mentioned.length) {
+        throw new Error("已填写参考素材，请在 Prompt 中用 @ 引用，例如 @图片1、@视频1 或 @音频1。");
+      }
+      const missing = mentioned.filter(item => !item.url());
+      if (missing.length) {
+        throw new Error(`${missing.map(item => item.token).join("、")} 还没有上传或填写 URL。`);
+      }
+      return mentioned;
     }
 
     async function uploadReference(kind, slot = "") {
@@ -1357,7 +1533,9 @@ INDEX_HTML = r"""<!doctype html>
         const data = await api("/api/upload-reference", {method: "POST", body: form});
         $(ids.url).value = data.url;
         const label = kind === "image" ? `图片${slot}` : kind === "video" ? "视频1" : "音频1";
-        status.textContent = `已上传：${label} · ${(data.size / 1024 / 1024).toFixed(2)} MB`;
+        const token = kind === "image" ? `@图片${slot}` : kind === "video" ? "@视频1" : "@音频1";
+        status.textContent = `已上传：${label} · 可引用 ${token} · ${(data.size / 1024 / 1024).toFixed(2)} MB`;
+        updateReferenceState();
       } catch (err) {
         status.textContent = err.message;
       } finally {
@@ -1368,6 +1546,14 @@ INDEX_HTML = r"""<!doctype html>
     async function generate() {
       $("generate").disabled = true;
       resetJobView();
+      let refs = [];
+      try {
+        refs = selectedReferences();
+      } catch (err) {
+        $("generate").disabled = false;
+        $("job").innerHTML = `<strong style="color:var(--danger)">引用素材缺失</strong><span class="small">${err.message}</span>`;
+        return;
+      }
       const payload = {
         api_key: $("apiKey").value.trim(),
         model: $("model").value,
@@ -1381,9 +1567,9 @@ INDEX_HTML = r"""<!doctype html>
         watermark: $("watermark").checked,
         web_search: $("webSearch").checked,
         safety_identifier: $("safetyIdentifier").value.trim(),
-        image_urls: imageUrls(),
-        video_url: $("videoUrl").value.trim(),
-        audio_url: $("audioUrl").value.trim()
+        image_urls: refs.filter(item => item.kind === "image").map(item => item.url()),
+        video_url: (refs.find(item => item.kind === "video") || {url: () => ""}).url(),
+        audio_url: (refs.find(item => item.kind === "audio") || {url: () => ""}).url()
       };
       try {
         const job = await api("/api/generate", {method: "POST", body: JSON.stringify(payload)});
@@ -1407,18 +1593,43 @@ INDEX_HTML = r"""<!doctype html>
 
     $("model").addEventListener("change", updateModelFields);
     $("generate").addEventListener("click", generate);
+    $("mentionButton").addEventListener("click", () => {
+      $("prompt").focus();
+      showMentionMenu("");
+    });
     $("clearForm").addEventListener("click", () => {
       $("prompt").value = "";
       ["imageUrl1","imageUrl2","imageUrl3","imageUrl4","videoUrl","audioUrl"].forEach(id => $(id).value = "");
       ["imageFile1","imageFile2","imageFile3","imageFile4","videoFile","audioFile"].forEach(id => $(id).value = "");
       ["imageUpload1","imageUpload2","imageUpload3","imageUpload4","videoUpload","audioUpload"].forEach(id => $(id).textContent = "");
       $("charCount").textContent = "0 字";
+      hideMentionMenu();
     });
-    $("prompt").addEventListener("input", () => $("charCount").textContent = `${$("prompt").value.length} 字`);
+    $("prompt").addEventListener("input", () => {
+      $("charCount").textContent = `${$("prompt").value.length} 字`;
+      const ctx = mentionContext();
+      if (ctx) showMentionMenu(ctx.query);
+      else hideMentionMenu();
+    });
+    $("prompt").addEventListener("click", () => {
+      const ctx = mentionContext();
+      if (ctx) showMentionMenu(ctx.query);
+    });
+    $("prompt").addEventListener("keydown", event => {
+      if (event.key === "Escape") hideMentionMenu();
+    });
+    document.addEventListener("click", event => {
+      if (!event.target.closest("#mentionMenu") && event.target !== $("mentionButton") && event.target !== $("prompt")) {
+        hideMentionMenu();
+      }
+    });
     $("refreshHistory").addEventListener("click", loadHistory);
     $("saveAllConfig").addEventListener("click", () => saveAllConfig().catch(err => alert(err.message)));
     document.querySelectorAll("[data-upload-kind]").forEach(button => {
       button.addEventListener("click", () => uploadReference(button.dataset.uploadKind, button.dataset.uploadSlot || ""));
+    });
+    ["imageUrl1","imageUrl2","imageUrl3","imageUrl4","videoUrl","audioUrl"].forEach(id => {
+      $(id).addEventListener("input", updateReferenceState);
     });
 
     Promise.all([
