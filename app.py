@@ -5,10 +5,14 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from fractions import Fraction
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,7 +20,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from ark_seedance import create_generation_task, download_file, get_generation_task
-from tos_uploader import TOSConfig, TOSUploadError, upload_media
+from tos_uploader import TOSConfig, TOSUploadError, normalize_media, upload_media
 
 
 ROOT = Path(__file__).resolve().parent
@@ -424,6 +428,156 @@ def history() -> list[dict[str, Any]]:
     return items[:30]
 
 
+def media_tool(name: str) -> str:
+    env_name = f"{name.upper()}_PATH"
+    return os.environ.get(env_name, "").strip() or shutil.which(name) or ""
+
+
+def parse_rate(value: Any) -> float:
+    raw = str(value or "").strip()
+    if not raw or raw in {"0/0", "N/A"}:
+        return 0.0
+    try:
+        return float(Fraction(raw))
+    except (ValueError, ZeroDivisionError):
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.0
+
+
+def rounded(value: float, digits: int = 3) -> float:
+    return round(value, digits) if value else 0.0
+
+
+def probe_video_file(path: Path) -> dict[str, Any]:
+    ffprobe = media_tool("ffprobe")
+    if not ffprobe:
+        raise TOSUploadError("无法检测参考视频帧率：未找到 ffprobe。请安装 FFmpeg，或先手动转为 30fps 后上传。")
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate,r_frame_rate,duration",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise TOSUploadError("参考视频检测超时，请换用更短的视频或先转码后上传。") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise TOSUploadError(f"参考视频检测失败：{detail or 'ffprobe 无法读取该视频。'}")
+    data = json.loads(proc.stdout or "{}")
+    stream = (data.get("streams") or [{}])[0]
+    fmt = data.get("format") or {}
+    avg_fps = parse_rate(stream.get("avg_frame_rate"))
+    nominal_fps = parse_rate(stream.get("r_frame_rate"))
+    fps = avg_fps or nominal_fps
+    duration = 0.0
+    for raw_duration in (stream.get("duration"), fmt.get("duration")):
+        try:
+            duration = float(raw_duration or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if duration:
+            break
+    return {
+        "fps": rounded(fps),
+        "avg_fps": rounded(avg_fps),
+        "nominal_fps": rounded(nominal_fps),
+        "width": int(stream.get("width") or 0),
+        "height": int(stream.get("height") or 0),
+        "duration": rounded(duration, 2),
+    }
+
+
+def transcode_video_to_30fps(source: Path, target: Path) -> None:
+    ffmpeg = media_tool("ffmpeg")
+    if not ffmpeg:
+        raise TOSUploadError("参考视频帧率超过 60fps，但未找到 ffmpeg，无法自动转码。请安装 FFmpeg，或手动转为 30fps 后上传。")
+    preferred = [os.environ.get("FFMPEG_VIDEO_ENCODER", "").strip(), "libx264", "libopenh264", "h264", "mpeg4"]
+    encoders = [encoder for index, encoder in enumerate(preferred) if encoder and encoder not in preferred[:index]]
+    last_detail = ""
+    for encoder in encoders:
+        if target.exists():
+            target.unlink()
+        video_args = ["-c:v", encoder, "-pix_fmt", "yuv420p"]
+        if encoder == "libx264":
+            video_args += ["-crf", "18", "-preset", "medium"]
+        elif encoder == "mpeg4":
+            video_args += ["-q:v", "3"]
+        else:
+            video_args += ["-b:v", "8M"]
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-vf",
+            "fps=30",
+            *video_args,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(target),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise TOSUploadError("参考视频自动转码超时，请手动转为 30fps 后上传。") from exc
+        if proc.returncode == 0 and target.exists() and target.stat().st_size > 0:
+            return
+        last_detail = (proc.stderr or proc.stdout or "").strip()
+    raise TOSUploadError(f"参考视频自动转码失败：{last_detail or 'ffmpeg 未生成输出文件。'}")
+
+
+def prepare_media_for_seedance(filename: str, content_type: str, data: bytes) -> tuple[str, str, bytes, dict[str, Any] | None]:
+    kind, mime, data = normalize_media(filename, content_type, data)
+    if kind != "video":
+        return filename, mime, data, None
+
+    suffix = Path(filename).suffix.lower() or mimetypes.guess_extension(mime) or ".mp4"
+    with tempfile.TemporaryDirectory(prefix="seedance_video_") as temp_dir:
+        source = Path(temp_dir) / f"source{suffix}"
+        source.write_bytes(data)
+        original = probe_video_file(source)
+        fps = float(original.get("fps") or 0)
+        if fps <= 60:
+            return filename, mime, data, {"video": original, "transcoded": False}
+
+        target = Path(temp_dir) / "source_30fps.mp4"
+        transcode_video_to_30fps(source, target)
+        output_data = target.read_bytes()
+        processed = probe_video_file(target)
+        new_name = f"{Path(filename).stem}_30fps.mp4"
+        return (
+            new_name,
+            "video/mp4",
+            output_data,
+            {
+                "video": processed,
+                "original_video": original,
+                "transcoded": True,
+                "message": f"原视频帧率 {rounded(fps)}fps 超过 60fps，已自动转为 30fps 后上传。",
+            },
+        )
+
+
 def _parse_header_params(value: str) -> dict[str, str]:
     parts = [part.strip() for part in value.split(";")]
     params: dict[str, str] = {"": parts[0].lower() if parts else ""}
@@ -560,7 +714,10 @@ class Handler(BaseHTTPRequestHandler):
         content_type = str(file_payload.get("content_type") or payload.get("content_type") or "").strip()
         storage_payload = payload.get("storage") if isinstance(payload.get("storage"), dict) else payload
         storage = resolve_storage_config(storage_payload)
-        result = upload_media(storage, filename, content_type, file_payload["data"])
+        filename, content_type, data, media_info = prepare_media_for_seedance(filename, content_type, file_payload["data"])
+        result = upload_media(storage, filename, content_type, data)
+        if media_info:
+            result["media_info"] = media_info
         self.send_json(result)
 
     def generate(self, payload: dict[str, Any]) -> None:
@@ -1499,6 +1656,21 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
 
+    function mediaInfoText(item) {
+      const meta = item.meta ? item.meta() : {};
+      const info = meta.mediaInfo || {};
+      if (info.video) {
+        const video = info.video;
+        const parts = [];
+        if (video.fps) parts.push(`${video.fps}fps`);
+        if (video.width && video.height) parts.push(`${video.width}x${video.height}`);
+        if (video.duration) parts.push(`${video.duration}s`);
+        if (info.transcoded) parts.push("已转 30fps");
+        return parts.join(" · ") || "视频已检测";
+      }
+      return `${kindLabel(item.kind)} · ${shortUrl(item.url())}`;
+    }
+
     function updateAssetLibrary() {
       const activeTokens = new Set([...((($("prompt") && $("prompt").value) || "").matchAll(/@(?:图片[1-4]|视频1|音频1)(?![\w\u4e00-\u9fff])/g))].map(match => match[0]));
       const filled = referenceItems().filter(item => item.url());
@@ -1514,7 +1686,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="asset-info">
               <div class="asset-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
               <button type="button" class="asset-ref" data-insert-token="${escapeHtml(item.token)}">${escapeHtml(item.token)}</button>
-              <div class="mention-url">${escapeHtml(kindLabel(item.kind))} · ${escapeHtml(shortUrl(item.url()))}</div>
+              <div class="mention-url">${escapeHtml(mediaInfoText(item))}</div>
             </div>
           </div>
         `;
@@ -1564,7 +1736,7 @@ INDEX_HTML = r"""<!doctype html>
           ${mediaPreview(item, "mention-thumb")}
           <span class="mention-meta">
             <span class="mention-name">${escapeHtml(fileNameFor(item))}</span>
-            <span class="mention-url">${escapeHtml(kindLabel(item.kind))} · ${escapeHtml(shortUrl(item.url()))}</span>
+            <span class="mention-url">${escapeHtml(mediaInfoText(item))}</span>
           </span>
           <span class="mention-token">${escapeHtml(item.token)}</span>
         </button>
@@ -1648,9 +1820,11 @@ INDEX_HTML = r"""<!doctype html>
           fileName: file.name,
           previewUrl: URL.createObjectURL(file),
           size: data.size,
-          contentType: data.content_type
+          contentType: data.content_type,
+          mediaInfo: data.media_info || null
         };
-        status.textContent = `已上传：${item.token} · ${(data.size / 1024 / 1024).toFixed(2)} MB`;
+        const videoNote = data.media_info?.message ? ` · ${data.media_info.message}` : "";
+        status.textContent = `已上传：${item.token} · ${(data.size / 1024 / 1024).toFixed(2)} MB${videoNote}`;
         updateReferenceState();
       } catch (err) {
         status.textContent = err.message;
