@@ -21,6 +21,7 @@ from tos_uploader import TOSConfig, TOSUploadError, upload_media
 
 ROOT = Path(__file__).resolve().parent
 OUTPUTS = ROOT / "outputs"
+STATIC = ROOT / "static"
 CONFIG_PATH = ROOT / ".seedance_config.json"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("SEEDANCE_UI_PORT") or os.environ.get("JIMENG_UI_PORT") or "7860")
@@ -501,6 +502,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(data)
         elif path.startswith("/outputs/"):
             self.send_output(path)
+        elif path.startswith("/static/"):
+            self.send_static(path)
         else:
             self.send_error_json(HTTPStatus.NOT_FOUND, "Not found")
 
@@ -598,6 +601,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_static(self, path: str) -> None:
+        name = unquote(path.removeprefix("/static/"))
+        file = (STATIC / name).resolve()
+        static_root = STATIC.resolve()
+        if static_root not in file.parents or not file.is_file():
+            self.send_error_json(HTTPStatus.NOT_FOUND, "文件不存在。")
+            return
+        mime = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+        data = file.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_html(self, html: str) -> None:
         data = html.encode("utf-8")
         self.send_response(HTTPStatus.OK)
@@ -627,7 +646,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Seedance Studio</title>
+  <title>SHIMEI Video Studio</title>
   <style>
     :root {
       color-scheme: dark;
@@ -696,17 +715,19 @@ INDEX_HTML = r"""<!doctype html>
     .brand {
       display: inline-flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
       font-weight: 760;
       font-size: 16px;
     }
-    .mark {
-      width: 28px;
-      height: 28px;
-      border: 1px solid rgba(255,255,255,.32);
-      border-radius: 8px;
-      background: linear-gradient(135deg, var(--cyan), var(--pink));
-      box-shadow: 0 0 28px rgba(52, 214, 255, .28);
+    .brand-logo {
+      width: 118px;
+      height: auto;
+      display: block;
+      filter: drop-shadow(0 0 20px rgba(48, 84, 218, .28));
+    }
+    .brand-name {
+      color: rgba(246, 247, 251, .9);
+      white-space: nowrap;
     }
     .pill-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .pill {
@@ -1001,7 +1022,7 @@ INDEX_HTML = r"""<!doctype html>
 <body>
   <div class="shell">
     <header class="nav">
-      <div class="brand"><span class="mark"></span><span>Seedance Studio</span></div>
+      <div class="brand"><img class="brand-logo" src="/static/logo.png" alt="SHIMEI" /><span class="brand-name">Video Studio</span></div>
       <div class="pill-row">
         <span class="pill"><span id="keyDot" class="dot"></span><span id="keyStatus">Ark 未配置</span></span>
         <span class="pill"><span id="storageDot" class="dot"></span><span id="storageStatus">TOS 未配置</span></span>
@@ -1415,7 +1436,7 @@ INDEX_HTML = r"""<!doctype html>
 def main() -> None:
     OUTPUTS.mkdir(exist_ok=True)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Seedance UI running at http://{HOST}:{PORT}", flush=True)
+    print(f"SHIMEI Video Studio running at http://{HOST}:{PORT}", flush=True)
     server.serve_forever()
 
 

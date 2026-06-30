@@ -1,4 +1,4 @@
-# Seedance Studio 本地控制台
+# SHIMEI Video Studio 本地控制台
 
 一个本地 Web UI，用来调用火山方舟 Doubao Seedance 2.0 视频生成接口。界面参考即梦/剪映一类的轻量生成入口：中间输入 Prompt，下面配置模型参数和参考素材，高级 Key 配置默认折叠。
 
