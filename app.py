@@ -855,7 +855,7 @@ INDEX_HTML = r"""<!doctype html>
       left: 18px;
       top: 66px;
       z-index: 20;
-      width: min(330px, calc(100% - 36px));
+      width: min(420px, calc(100% - 36px));
       max-height: 285px;
       overflow: auto;
       padding: 8px;
@@ -871,7 +871,7 @@ INDEX_HTML = r"""<!doctype html>
       border-radius: 10px;
       padding: 8px 10px;
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-columns: 46px minmax(0, 1fr) auto;
       gap: 8px;
       align-items: center;
       color: var(--text);
@@ -887,7 +887,7 @@ INDEX_HTML = r"""<!doctype html>
       opacity: .45;
     }
     .mention-token {
-      min-width: 52px;
+      min-width: 56px;
       min-height: 28px;
       display: inline-flex;
       align-items: center;
@@ -897,6 +897,28 @@ INDEX_HTML = r"""<!doctype html>
       background: linear-gradient(135deg, var(--cyan), var(--lime));
       font-size: 12px;
       font-weight: 800;
+    }
+    .mention-thumb, .asset-thumb {
+      width: 46px;
+      height: 46px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.16);
+      background: rgba(255,255,255,.07);
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .mention-thumb img, .mention-thumb video, .asset-thumb img, .asset-thumb video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
     }
     .mention-meta {
       min-width: 0;
@@ -927,24 +949,71 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 12px;
       font-weight: 650;
     }
-    .asset-grid {
-      align-items: stretch;
+    .asset-upload {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
     }
-    .asset {
-      min-width: min(210px, 100%);
-      flex: 1;
+    .plus-btn {
+      min-width: 132px;
+      border-color: rgba(52, 214, 255, .42);
+      background: rgba(52, 214, 255, .1);
+      color: var(--text);
+      font-weight: 760;
+    }
+    .asset-library {
       display: grid;
-      gap: 7px;
+      grid-template-columns: repeat(auto-fit, minmax(164px, 1fr));
+      gap: 8px;
     }
-    .asset label, .field label {
+    .asset-card {
+      min-height: 74px;
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr);
+      align-items: center;
+      gap: 9px;
+      padding: 9px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      background: rgba(255,255,255,.055);
+      overflow: hidden;
+    }
+    .asset-card.empty {
+      grid-template-columns: 1fr;
+      color: var(--muted);
+    }
+    .asset-card.active {
+      border-color: rgba(52, 214, 255, .36);
+      background: rgba(52, 214, 255, .09);
+    }
+    .asset-info {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .asset-name {
+      font-size: 13px;
+      font-weight: 760;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .asset-ref {
+      width: fit-content;
+      border: 0;
+      border-radius: 999px;
+      padding: 3px 8px;
+      color: #071017;
+      background: linear-gradient(135deg, var(--cyan), var(--lime));
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .field label {
       color: var(--muted);
       font-size: 12px;
       font-weight: 650;
-    }
-    .upload-line {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 7px;
     }
     input[type="file"] {
       min-width: 0;
@@ -1130,62 +1199,26 @@ INDEX_HTML = r"""<!doctype html>
           </div>
 
           <div class="asset-panel">
-            <div class="asset-title"><span>参考素材</span><span>使用 @图片1 / @视频1 / @音频1 引用</span></div>
-            <div class="asset-grid">
-              <div class="asset">
-                <label for="imageFile1">图片1</label>
-                <input id="imageUrl1" class="input url" placeholder="图片 URL 或上传后自动填入" />
-                <div class="upload-line">
-                  <input id="imageFile1" type="file" accept="image/png,image/jpeg,image/webp" />
-                  <button type="button" class="btn" data-upload-kind="image" data-upload-slot="1">上传</button>
-                </div>
-                <div id="imageUpload1" class="status"></div>
-              </div>
-              <div class="asset">
-                <label for="imageFile2">图片2</label>
-                <input id="imageUrl2" class="input url" placeholder="图片 URL 或上传后自动填入" />
-                <div class="upload-line">
-                  <input id="imageFile2" type="file" accept="image/png,image/jpeg,image/webp" />
-                  <button type="button" class="btn" data-upload-kind="image" data-upload-slot="2">上传</button>
-                </div>
-                <div id="imageUpload2" class="status"></div>
-              </div>
-              <div class="asset">
-                <label for="imageFile3">图片3</label>
-                <input id="imageUrl3" class="input url" placeholder="图片 URL 或上传后自动填入" />
-                <div class="upload-line">
-                  <input id="imageFile3" type="file" accept="image/png,image/jpeg,image/webp" />
-                  <button type="button" class="btn" data-upload-kind="image" data-upload-slot="3">上传</button>
-                </div>
-                <div id="imageUpload3" class="status"></div>
-              </div>
-              <div class="asset">
-                <label for="imageFile4">图片4</label>
-                <input id="imageUrl4" class="input url" placeholder="图片 URL 或上传后自动填入" />
-                <div class="upload-line">
-                  <input id="imageFile4" type="file" accept="image/png,image/jpeg,image/webp" />
-                  <button type="button" class="btn" data-upload-kind="image" data-upload-slot="4">上传</button>
-                </div>
-                <div id="imageUpload4" class="status"></div>
-              </div>
-              <div class="asset">
-                <label for="videoFile">视频1</label>
-                <input id="videoUrl" class="input url" placeholder="参考视频 URL 或上传后自动填入" />
-                <div class="upload-line">
-                  <input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/webm" />
-                  <button type="button" class="btn" data-upload-kind="video">上传</button>
-                </div>
-                <div id="videoUpload" class="status"></div>
-              </div>
-              <div class="asset">
-                <label for="audioFile">音频1</label>
-                <input id="audioUrl" class="input url" placeholder="参考音频 URL 或上传后自动填入" />
-                <div class="upload-line">
-                  <input id="audioFile" type="file" accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg" />
-                  <button type="button" class="btn" data-upload-kind="audio">上传</button>
-                </div>
-                <div id="audioUpload" class="status"></div>
-              </div>
+            <div class="asset-title"><span>资源库</span><span>点击 + 上传，Prompt 里用 @ 引用</span></div>
+            <div class="asset-upload">
+              <input id="unifiedUploadFile" class="hidden" type="file" multiple accept="image/png,image/jpeg,image/webp,video/mp4,video/quicktime,video/webm,audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg" />
+              <button id="uploadAnyButton" type="button" class="btn plus-btn">+ 上传素材</button>
+              <span id="assetUploadStatus" class="status">支持图片、视频、音频；上传后用 @ 引用。</span>
+            </div>
+            <div id="assetLibrary" class="asset-library"></div>
+            <div class="hidden">
+              <input id="imageUrl1" />
+              <input id="imageUrl2" />
+              <input id="imageUrl3" />
+              <input id="imageUrl4" />
+              <input id="videoUrl" />
+              <input id="audioUrl" />
+              <span id="imageUpload1"></span>
+              <span id="imageUpload2"></span>
+              <span id="imageUpload3"></span>
+              <span id="imageUpload4"></span>
+              <span id="videoUpload"></span>
+              <span id="audioUpload"></span>
             </div>
           </div>
 
@@ -1288,6 +1321,7 @@ INDEX_HTML = r"""<!doctype html>
     const $ = (id) => document.getElementById(id);
     let models = {};
     let currentJob = null;
+    let resourceMeta = {};
 
     async function api(path, options = {}) {
       const headers = options.body instanceof FormData ? (options.headers || {}) : {"Content-Type": "application/json", ...(options.headers || {})};
@@ -1412,20 +1446,82 @@ INDEX_HTML = r"""<!doctype html>
       }[char]));
     }
 
+    function escapeRegex(value) {
+      return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function isTokenMentioned(text, token) {
+      return new RegExp(`${escapeRegex(token)}(?![\\w\\u4e00-\\u9fff])`).test(text);
+    }
+
     function referenceItems() {
       return [
-        {kind:"image", token:"@图片1", label:"图片1", urlId:"imageUrl1", statusId:"imageUpload1"},
-        {kind:"image", token:"@图片2", label:"图片2", urlId:"imageUrl2", statusId:"imageUpload2"},
-        {kind:"image", token:"@图片3", label:"图片3", urlId:"imageUrl3", statusId:"imageUpload3"},
-        {kind:"image", token:"@图片4", label:"图片4", urlId:"imageUrl4", statusId:"imageUpload4"},
-        {kind:"video", token:"@视频1", label:"视频1", urlId:"videoUrl", statusId:"videoUpload"},
-        {kind:"audio", token:"@音频1", label:"音频1", urlId:"audioUrl", statusId:"audioUpload"}
-      ].map(item => ({...item, url: () => $(item.urlId).value.trim()}));
+        {kind:"image", slot:"1", token:"@图片1", label:"图片1", urlId:"imageUrl1", statusId:"imageUpload1"},
+        {kind:"image", slot:"2", token:"@图片2", label:"图片2", urlId:"imageUrl2", statusId:"imageUpload2"},
+        {kind:"image", slot:"3", token:"@图片3", label:"图片3", urlId:"imageUrl3", statusId:"imageUpload3"},
+        {kind:"image", slot:"4", token:"@图片4", label:"图片4", urlId:"imageUrl4", statusId:"imageUpload4"},
+        {kind:"video", slot:"1", token:"@视频1", label:"视频1", urlId:"videoUrl", statusId:"videoUpload"},
+        {kind:"audio", slot:"1", token:"@音频1", label:"音频1", urlId:"audioUrl", statusId:"audioUpload"}
+      ].map(item => ({...item, url: () => $(item.urlId).value.trim(), meta: () => resourceMeta[item.token] || {}}));
+    }
+
+    function kindLabel(kind) {
+      return {image:"图片", video:"视频", audio:"音频"}[kind] || "素材";
+    }
+
+    function mediaPreview(item, className = "asset-thumb") {
+      const meta = item.meta ? item.meta() : {};
+      const src = meta.previewUrl || item.url();
+      const alt = escapeHtml(meta.fileName || item.label);
+      if (item.kind === "image" && src) {
+        return `<span class="${className}"><img src="${escapeHtml(src)}" alt="${alt}" /></span>`;
+      }
+      if (item.kind === "video" && src) {
+        return `<span class="${className}"><video src="${escapeHtml(src)}" muted playsinline preload="metadata"></video></span>`;
+      }
+      return `<span class="${className}">${item.kind === "audio" ? "AUD" : item.kind === "video" ? "VID" : "IMG"}</span>`;
     }
 
     function shortUrl(url) {
       if (!url) return "未填写 URL，选择后可先插入占位引用";
       return url.replace(/^https?:\/\//, "").slice(0, 58);
+    }
+
+    function fileNameFor(item) {
+      const meta = item.meta ? item.meta() : {};
+      if (meta.fileName) return meta.fileName;
+      const url = item.url();
+      if (!url) return `${kindLabel(item.kind)}素材`;
+      try {
+        return decodeURIComponent(new URL(url).pathname.split("/").filter(Boolean).pop() || item.label);
+      } catch {
+        return item.label;
+      }
+    }
+
+    function updateAssetLibrary() {
+      const activeTokens = new Set([...((($("prompt") && $("prompt").value) || "").matchAll(/@(?:图片[1-4]|视频1|音频1)(?![\w\u4e00-\u9fff])/g))].map(match => match[0]));
+      const filled = referenceItems().filter(item => item.url());
+      if (!filled.length) {
+        $("assetLibrary").innerHTML = `<div class="asset-card empty">暂无资源，点击 + 上传图片、视频或音频。</div>`;
+        return;
+      }
+      $("assetLibrary").innerHTML = filled.map(item => {
+        const name = fileNameFor(item);
+        return `
+          <div class="asset-card ${activeTokens.has(item.token) ? "active" : ""}">
+            ${mediaPreview(item)}
+            <div class="asset-info">
+              <div class="asset-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+              <button type="button" class="asset-ref" data-insert-token="${escapeHtml(item.token)}">${escapeHtml(item.token)}</button>
+              <div class="mention-url">${escapeHtml(kindLabel(item.kind))} · ${escapeHtml(shortUrl(item.url()))}</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+      document.querySelectorAll("[data-insert-token]").forEach(button => {
+        button.addEventListener("click", () => insertMention(button.dataset.insertToken));
+      });
     }
 
     function updateReferenceState() {
@@ -1438,6 +1534,7 @@ INDEX_HTML = r"""<!doctype html>
           status.textContent = "";
         }
       });
+      updateAssetLibrary();
     }
 
     function mentionContext() {
@@ -1458,19 +1555,20 @@ INDEX_HTML = r"""<!doctype html>
 
     function showMentionMenu(query = "") {
       const normalized = query.trim().toLowerCase();
-      const items = referenceItems().filter(item => {
+      const items = referenceItems().filter(item => item.url()).filter(item => {
         const haystack = `${item.token} ${item.label} ${item.kind}`.toLowerCase();
         return !normalized || haystack.includes(normalized);
       });
       $("mentionMenu").innerHTML = items.map(item => `
         <button type="button" class="mention-item" data-token="${escapeHtml(item.token)}">
-          <span class="mention-token">${escapeHtml(item.token)}</span>
+          ${mediaPreview(item, "mention-thumb")}
           <span class="mention-meta">
-            <span class="mention-name">${escapeHtml(item.label)}</span>
-            <span class="mention-url">${escapeHtml(shortUrl(item.url()))}</span>
+            <span class="mention-name">${escapeHtml(fileNameFor(item))}</span>
+            <span class="mention-url">${escapeHtml(kindLabel(item.kind))} · ${escapeHtml(shortUrl(item.url()))}</span>
           </span>
+          <span class="mention-token">${escapeHtml(item.token)}</span>
         </button>
-      `).join("") || `<div class="mention-item"><span class="mention-meta"><span class="mention-name">没有匹配的素材</span></span></div>`;
+      `).join("") || `<div class="mention-item"><span class="mention-meta"><span class="mention-name">暂无可引用素材</span><span class="mention-url">先点击 + 上传图片、视频或音频</span></span></div>`;
       $("mentionMenu").classList.remove("hidden");
       document.querySelectorAll("[data-token]").forEach(button => {
         button.addEventListener("mousedown", event => {
@@ -1501,7 +1599,7 @@ INDEX_HTML = r"""<!doctype html>
       const text = $("prompt").value;
       const items = referenceItems();
       const filled = items.filter(item => item.url());
-      const mentioned = items.filter(item => text.includes(item.token));
+      const mentioned = items.filter(item => isTokenMentioned(text, item.token));
       if (filled.length && !mentioned.length) {
         throw new Error("已填写参考素材，请在 Prompt 中用 @ 引用，例如 @图片1、@视频1 或 @音频1。");
       }
@@ -1512,35 +1610,73 @@ INDEX_HTML = r"""<!doctype html>
       return mentioned;
     }
 
-    async function uploadReference(kind, slot = "") {
-      const ids = kind === "image" ? {file:`imageFile${slot}`, url:`imageUrl${slot}`, status:`imageUpload${slot}`} :
-        kind === "video" ? {file:"videoFile", url:"videoUrl", status:"videoUpload"} :
-        {file:"audioFile", url:"audioUrl", status:"audioUpload"};
-      const fileInput = $(ids.file);
-      const status = $(ids.status);
-      const file = fileInput.files[0];
-      if (!file) {
-        status.textContent = `请选择${kind === "image" ? "图片" : kind === "video" ? "视频" : "音频"}`;
-        return;
+    function kindFromFile(file) {
+      const type = (file.type || "").toLowerCase();
+      if (type.startsWith("image/")) return "image";
+      if (type.startsWith("video/")) return "video";
+      if (type.startsWith("audio/")) return "audio";
+      const name = file.name.toLowerCase();
+      if (/\.(jpg|jpeg|png|webp)$/.test(name)) return "image";
+      if (/\.(mp4|mov|webm)$/.test(name)) return "video";
+      if (/\.(mp3|wav|m4a|aac|ogg)$/.test(name)) return "audio";
+      return "";
+    }
+
+    function nextSlot(kind) {
+      const candidates = referenceItems().filter(item => item.kind === kind);
+      if (kind === "image") {
+        const empty = candidates.find(item => !item.url());
+        return empty || null;
       }
-      const button = document.querySelector(`[data-upload-kind="${kind}"]${slot ? `[data-upload-slot="${slot}"]` : ""}`);
+      return candidates[0] || null;
+    }
+
+    async function uploadFileToResource(file, item) {
+      const status = $("assetUploadStatus");
+      const button = $("uploadAnyButton");
       button.disabled = true;
-      status.textContent = "上传中...";
+      status.textContent = `上传中：${file.name}`;
       try {
         const form = new FormData();
         form.append("file", file);
         Object.entries(storagePayload()).forEach(([key, value]) => form.append(key, value));
         const data = await api("/api/upload-reference", {method: "POST", body: form});
-        $(ids.url).value = data.url;
-        const label = kind === "image" ? `图片${slot}` : kind === "video" ? "视频1" : "音频1";
-        const token = kind === "image" ? `@图片${slot}` : kind === "video" ? "@视频1" : "@音频1";
-        status.textContent = `已上传：${label} · 可引用 ${token} · ${(data.size / 1024 / 1024).toFixed(2)} MB`;
+        $(item.urlId).value = data.url;
+        $(item.statusId).textContent = `可引用 ${item.token}`;
+        if (resourceMeta[item.token]?.previewUrl) URL.revokeObjectURL(resourceMeta[item.token].previewUrl);
+        resourceMeta[item.token] = {
+          fileName: file.name,
+          previewUrl: URL.createObjectURL(file),
+          size: data.size,
+          contentType: data.content_type
+        };
+        status.textContent = `已上传：${item.token} · ${(data.size / 1024 / 1024).toFixed(2)} MB`;
         updateReferenceState();
       } catch (err) {
         status.textContent = err.message;
       } finally {
         button.disabled = false;
       }
+    }
+
+    async function uploadAnyReference() {
+      const input = $("unifiedUploadFile");
+      const files = [...input.files];
+      if (!files.length) return;
+      for (const file of files) {
+        const kind = kindFromFile(file);
+        if (!kind) {
+          $("assetUploadStatus").textContent = `不支持的素材类型：${file.name}`;
+          continue;
+        }
+        const item = nextSlot(kind);
+        if (!item) {
+          $("assetUploadStatus").textContent = "图片最多 4 张，视频和音频各 1 个。";
+          continue;
+        }
+        await uploadFileToResource(file, item);
+      }
+      input.value = "";
     }
 
     async function generate() {
@@ -1597,16 +1733,23 @@ INDEX_HTML = r"""<!doctype html>
       $("prompt").focus();
       showMentionMenu("");
     });
+    $("uploadAnyButton").addEventListener("click", () => $("unifiedUploadFile").click());
+    $("unifiedUploadFile").addEventListener("change", () => uploadAnyReference());
     $("clearForm").addEventListener("click", () => {
       $("prompt").value = "";
       ["imageUrl1","imageUrl2","imageUrl3","imageUrl4","videoUrl","audioUrl"].forEach(id => $(id).value = "");
-      ["imageFile1","imageFile2","imageFile3","imageFile4","videoFile","audioFile"].forEach(id => $(id).value = "");
       ["imageUpload1","imageUpload2","imageUpload3","imageUpload4","videoUpload","audioUpload"].forEach(id => $(id).textContent = "");
+      Object.values(resourceMeta).forEach(meta => { if (meta.previewUrl) URL.revokeObjectURL(meta.previewUrl); });
+      resourceMeta = {};
+      $("unifiedUploadFile").value = "";
+      $("assetUploadStatus").textContent = "支持图片、视频、音频；上传后用 @ 引用。";
       $("charCount").textContent = "0 字";
       hideMentionMenu();
+      updateAssetLibrary();
     });
     $("prompt").addEventListener("input", () => {
       $("charCount").textContent = `${$("prompt").value.length} 字`;
+      updateAssetLibrary();
       const ctx = mentionContext();
       if (ctx) showMentionMenu(ctx.query);
       else hideMentionMenu();
@@ -1625,12 +1768,10 @@ INDEX_HTML = r"""<!doctype html>
     });
     $("refreshHistory").addEventListener("click", loadHistory);
     $("saveAllConfig").addEventListener("click", () => saveAllConfig().catch(err => alert(err.message)));
-    document.querySelectorAll("[data-upload-kind]").forEach(button => {
-      button.addEventListener("click", () => uploadReference(button.dataset.uploadKind, button.dataset.uploadSlot || ""));
-    });
     ["imageUrl1","imageUrl2","imageUrl3","imageUrl4","videoUrl","audioUrl"].forEach(id => {
       $(id).addEventListener("input", updateReferenceState);
     });
+    updateAssetLibrary();
 
     Promise.all([
       api("/api/config").then(renderConfig),
